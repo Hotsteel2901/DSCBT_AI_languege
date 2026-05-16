@@ -1,0 +1,12 @@
+// fibonacci.dscbt - 斐波那契数列
+
+fn fib(n):
+    if n <= 1:
+        ret n
+    ret fib(n - 1) + fib(n - 2)
+
+prt("斐波那契数列:")
+let i = 0
+whl i <= 10:
+    prt(fib(i))
+    i = i + 1

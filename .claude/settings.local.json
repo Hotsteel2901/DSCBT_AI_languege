@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm -f D:/fbctl/dsc.exe)",
+      "Bash(gcc -O2 -Wall -Wno-parentheses -Wno-misleading-indentation -o dsc.exe dsc.c)",
+      "Bash(./dsc.exe test2.dscbt)",
+      "Bash(./test2.exe)",
+      "Bash(./dsc.exe test.dscbt)",
+      "Bash(./test.exe)",
+      "Bash(./dsc.exe test3.dscbt)"
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+// hello.dscbt - Hello World 示例
+prt("你好，世界！")
+prt("DSCBT 编程语言")
+prt("================")
+
+let x = 42
+let y = 58
+prt(x + y)

@@ -1,0 +1,20 @@
+// struct.dscbt - 结构体示例
+
+typ Point:
+    x: int
+    y: int
+
+let p = Point{x: 10, y: 20}
+prt(p.x)
+prt(p.y)
+
+p.x = 100
+prt(p.x)
+
+typ Rect:
+    tl: Point
+    br: Point
+
+let r = Rect{tl: Point{x: 0, y: 0}, br: Point{x: 10, y: 10}}
+prt(r.tl.x)
+prt(r.br.y)

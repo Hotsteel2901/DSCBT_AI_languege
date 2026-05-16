@@ -1,0 +1,18 @@
+// prime.dscbt - 素数判断
+
+fn is_prime(n):
+    if n <= 1:
+        ret fal
+    let i = 2
+    whl i * i <= n:
+        if n % i == 0:
+            ret fal
+        i = i + 1
+    ret tru
+
+prt("1到50的素数:")
+let num = 2
+whl num <= 50:
+    if is_prime(num):
+        prt(num)
+    num = num + 1

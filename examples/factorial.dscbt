@@ -1,0 +1,12 @@
+// factorial.dscbt - 阶乘计算
+
+fn fact(n):
+    if n <= 1:
+        ret 1
+    ret n * fact(n - 1)
+
+prt("阶乘:")
+let i = 1
+whl i <= 10:
+    prt(fact(i))
+    i = i + 1
