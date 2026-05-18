@@ -10,7 +10,7 @@ DSCBT 是一门**编译型**编程语言，语法类似 Python 般简洁，但�
 - 编译为原生机器码，运行效率高
 - 图灵完备（支持条件、循环、递归函数）
 
-**语言得名：** DSCBT = Dynamic Static Compiled Binary Translator
+**语言得名：** DSCBT = DS Code Basic Test
 
 ---
 
