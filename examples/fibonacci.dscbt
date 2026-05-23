@@ -1,12 +1,12 @@
 // fibonacci.dscbt - 斐波那契数列
 
-fn fib(n):
+def fib(n):
     if n <= 1:
-        ret n
-    ret fib(n - 1) + fib(n - 2)
+        return n
+    return fib(n - 1) + fib(n - 2)
 
-prt("斐波那契数列:")
-let i = 0
-whl i <= 10:
-    prt(fib(i))
+print("斐波那契数列:")
+i = 0
+while i <= 10:
+    print(fib(i))
     i = i + 1

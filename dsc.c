@@ -1,6 +1,7 @@
-/* DSCBT Compiler - dsc.c
- * Compiles .dscbt source files to native executables via C code generation.
- * Usage: dsc <source.dscbt> [output.exe]
+/* DSC Language - Bytecode Interpreter v2.0
+ * A Python-like scripting language with built-in bytecode execution.
+ * No external C compiler needed at runtime.
+ * Usage: dsc <source.dscbt>
  */
 
 #include <stdio.h>
@@ -9,878 +10,1730 @@
 #include <ctype.h>
 #include <stdint.h>
 #include <stdarg.h>
-#include <sys/stat.h>
 
 /* ================================================================
- *  Error handling
+ *  Section 1: Utilities
  * ================================================================ */
-static void error_at(int line, int col, const char* fmt, ...) {
+
+static void dsc_error(int line, int col, const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    fprintf(stderr, "\346\227\245\345\277\227 [%d:%d]: ", line, col);
+    fprintf(stderr, "\xe9\x94\x99\xe8\xaf\xaf [%d:%d]: ", line, col);
     vfprintf(stderr, fmt, args);
     fprintf(stderr, "\n");
     va_end(args);
     exit(1);
 }
 
-/* ================================================================
- *  Dynamic string
- * ================================================================ */
-typedef struct { char* data; int len; int cap; } DStr;
-static DStr* dstr_new(void) { DStr* s = malloc(sizeof(DStr)); s->cap = 128; s->data = malloc(s->cap); s->data[0] = 0; s->len = 0; return s; }
-static void dstr_grow(DStr* s, int need) { while (s->len + need + 1 > s->cap) { s->cap *= 2; s->data = realloc(s->data, s->cap); } }
-static void dstr_add(DStr* s, const char* str) { int n = (int)strlen(str); dstr_grow(s, n); strcpy(s->data + s->len, str); s->len += n; }
-static void dstr_addc(DStr* s, char c) { dstr_grow(s, 1); s->data[s->len++] = c; s->data[s->len] = 0; }
-static void dstr_addi(DStr* s, int64_t v) { char b[32]; snprintf(b, sizeof(b), "%lld", (long long)v); dstr_add(s, b); }
-static void dstr_addd(DStr* s, double v) { char b[64]; snprintf(b, sizeof(b), "%.16g", v); dstr_add(s, b); }
-static void dstr_free(DStr* s) { free(s->data); free(s); }
+/* --- Dynamic String --- */
+typedef struct { char* s; int len; int cap; } SBuf;
+
+static SBuf* sb_new(void) {
+    SBuf* b = malloc(sizeof(SBuf));
+    b->cap = 256; b->s = malloc(b->cap); b->s[0] = 0; b->len = 0;
+    return b;
+}
+
+static void sb_push(SBuf* b, const char* str) {
+    int n = (int)strlen(str);
+    while (b->len + n + 1 > b->cap) { b->cap *= 2; b->s = realloc(b->s, b->cap); }
+    memcpy(b->s + b->len, str, n); b->len += n; b->s[b->len] = 0;
+}
+
+static void sb_ch(SBuf* b, char c) {
+    while (b->len + 2 > b->cap) { b->cap *= 2; b->s = realloc(b->s, b->cap); }
+    b->s[b->len++] = c; b->s[b->len] = 0;
+}
+
+static void sb_int(SBuf* b, int64_t v) { char buf[32]; snprintf(buf, sizeof(buf), "%lld", (long long)v); sb_push(b, buf); }
+static void sb_flt(SBuf* b, double v) { char buf[64]; snprintf(buf, sizeof(buf), "%.16g", v); sb_push(b, buf); }
+static void sb_free(SBuf* b) { free(b->s); free(b); }
 
 /* ================================================================
- *  Token types
+ *  Section 2: Lexer
  * ================================================================ */
+
 enum {
     TK_EOF=0, TK_NL, TK_INDENT, TK_DEDENT,
-    TK_IDENT, TK_INT, TK_FLT, TK_STR,
+    TK_ID, TK_INT, TK_FLT, TK_STR,
     TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH, TK_PCT,
     TK_EQ, TK_EQEQ, TK_NEQ, TK_LT, TK_GT, TK_LTE, TK_GTE,
     TK_LP, TK_RP, TK_LB, TK_RB, TK_LC, TK_RC,
-    TK_COLON, TK_SEMI, TK_COMMA, TK_DOT, TK_HASH,
-    TK_AMP, TK_PIPE, TK_BANG,
-    KW_LET, KW_FN, KW_RET, KW_IF, KW_ELS, KW_WHL, KW_FOR,
-    KW_PRT, KW_INP, KW_TRU, KW_FAL, KW_TYP,
+    TK_COLON, TK_COMMA, TK_DOT,
+    KW_TRUE, KW_FALSE,
+    KW_IF, KW_ELS, KW_WHILE, KW_FOR, KW_IN,
+    KW_DEF, KW_RETURN, KW_CLASS,
+    KW_AND, KW_OR, KW_NOT,
     KW_INT, KW_FLT, KW_STR, KW_BOL, KW_VOID,
-};
-static const char* tk_names[] = {
-    "EOF","NL","INDENT","DEDENT","ID","INT","FLT","STR",
-    "+","-","*","/","%","=","==","!=","<",">","<=",">=",
-    "(",")","[","]","{","}",":",";",",",".","#","&","|","!",
-    "let","fn","ret","if","els","whl","for","prt","inp","tru","fal","typ",
-    "int","flt","str","bol","void",
+    KW_RANGE,
 };
 
-typedef struct { int type; char* text; int line, col; } Token;
-static Token* tk_new(int t, const char* s, int ln, int co) {
-    Token* tk = malloc(sizeof(Token)); tk->type = t; tk->text = strdup(s?s:""); tk->line = ln; tk->col = co; return tk;
-}
-static void tk_free(Token* tk) { free(tk->text); free(tk); }
-
-/* ================================================================
- *  Lexer
- * ================================================================ */
-typedef struct {
-    const char* src; int pos, len, line, col;
-} Lexer;
-
-static int is_id0(int c) { return isalpha(c) || c == '_'; }
-static int is_id1(int c) { return isalpha(c) || isdigit(c) || c == '_'; }
-
-static int kw_lookup(const char* w) {
-    if (!strcmp(w,"let")) return KW_LET; if (!strcmp(w,"fn")) return KW_FN;
-    if (!strcmp(w,"ret")) return KW_RET; if (!strcmp(w,"if")) return KW_IF;
-    if (!strcmp(w,"els")) return KW_ELS; if (!strcmp(w,"whl")) return KW_WHL;
-    if (!strcmp(w,"for")) return KW_FOR; if (!strcmp(w,"prt")) return KW_PRT;
-    if (!strcmp(w,"inp")) return KW_INP; if (!strcmp(w,"tru")) return KW_TRU;
-    if (!strcmp(w,"fal")) return KW_FAL; if (!strcmp(w,"typ")) return KW_TYP;
-    if (!strcmp(w,"int")) return KW_INT; if (!strcmp(w,"flt")) return KW_FLT;
-    if (!strcmp(w,"str")) return KW_STR; if (!strcmp(w,"bol")) return KW_BOL;
-    if (!strcmp(w,"void")) return KW_VOID; return TK_IDENT;
+static const char* tk_name(int t) {
+    static const char* names[] = {
+        "EOF","NL","INDENT","DEDENT","ID","INT","FLT","STR",
+        "+","-","*","/","%","=","==","!=","<",">","<=",">=",
+        "(",")","[","]","{","}",":",",",".",
+        "True","False","if","els","while","for","in",
+        "def","return","class","and","or","not",
+        "int","flt","str","bol","void","range",
+    };
+    return names[t];
 }
 
-static Token* lex_one(Lexer* lx) {
-    while (lx->pos < lx->len && lx->src[lx->pos] != '\n' && (lx->src[lx->pos] == ' ' || lx->src[lx->pos] == '\t')) {
-        lx->pos++; lx->col++;
-    }
-    if (lx->pos >= lx->len) return tk_new(TK_EOF, "", lx->line, lx->col);
+typedef struct { int type; char* text; int line, col; } Tok;
 
+static Tok* tok_new(int t, const char* s, int ln, int co) {
+    Tok* tk = malloc(sizeof(Tok));
+    tk->type = t; tk->text = strdup(s ? s : ""); tk->line = ln; tk->col = co;
+    return tk;
+}
+
+static void tok_free(Tok* tk) { free(tk->text); free(tk); }
+
+typedef struct { const char* src; int pos, len, line, col; } Lxr;
+
+static int lookup_kw(const char* w) {
+    if (!strcmp(w,"True")) return KW_TRUE;
+    if (!strcmp(w,"False")) return KW_FALSE;
+    if (!strcmp(w,"if")) return KW_IF;
+    if (!strcmp(w,"els")) return KW_ELS;
+    if (!strcmp(w,"while")) return KW_WHILE;
+    if (!strcmp(w,"for")) return KW_FOR;
+    if (!strcmp(w,"in")) return KW_IN;
+    if (!strcmp(w,"def")) return KW_DEF;
+    if (!strcmp(w,"return")) return KW_RETURN;
+    if (!strcmp(w,"class")) return KW_CLASS;
+    if (!strcmp(w,"and")) return KW_AND;
+    if (!strcmp(w,"or")) return KW_OR;
+    if (!strcmp(w,"not")) return KW_NOT;
+    if (!strcmp(w,"int")) return KW_INT;
+    if (!strcmp(w,"flt")) return KW_FLT;
+    if (!strcmp(w,"str")) return KW_STR;
+    if (!strcmp(w,"bol")) return KW_BOL;
+    if (!strcmp(w,"void")) return KW_VOID;
+    if (!strcmp(w,"range")) return KW_RANGE;
+    return TK_ID;
+}
+
+static Tok* lex_one(Lxr* lx) {
+    while (lx->pos < lx->len && lx->src[lx->pos] == ' ') { lx->pos++; lx->col++; }
+    if (lx->pos >= lx->len) return tok_new(TK_EOF, "", lx->line, lx->col);
     char c = lx->src[lx->pos];
-    if (c == '\n') { lx->pos++; lx->line++; int co = lx->col; lx->col = 1; return tk_new(TK_NL, "\n", lx->line-1, co); }
 
-    if (c == '"') { lx->pos++; lx->col++; DStr* s = dstr_new();
+    if (c == '\n' || c == '\r') {
+        if (c == '\r') { lx->pos++; if (lx->pos < lx->len && lx->src[lx->pos] == '\n') lx->pos++; }
+        else lx->pos++;
+        int co = lx->col; lx->col = 1; lx->line++;
+        return tok_new(TK_NL, "\n", lx->line - 1, co);
+    }
+
+    if (c == '"') {
+        lx->pos++; lx->col++;
+        SBuf* sb = sb_new();
         while (lx->pos < lx->len && lx->src[lx->pos] != '"' && lx->src[lx->pos] != '\n') {
-            if (lx->src[lx->pos] == '\\' && lx->pos+1 < lx->len) { lx->pos++; lx->col++;
-                switch (lx->src[lx->pos]) { case 'n': dstr_addc(s,'\n'); break; case 't': dstr_addc(s,'\t'); break;
-                case 'r': dstr_addc(s,'\r'); break; case '\\': dstr_addc(s,'\\'); break; case '"': dstr_addc(s,'"'); break;
-                default: dstr_addc(s,lx->src[lx->pos]); break; }
-            } else { dstr_addc(s, lx->src[lx->pos]); }
+            if (lx->src[lx->pos] == '\\' && lx->pos + 1 < lx->len) {
+                lx->pos++; lx->col++;
+                switch (lx->src[lx->pos]) {
+                    case 'n': sb_ch(sb, '\n'); break; case 't': sb_ch(sb, '\t'); break;
+                    case 'r': sb_ch(sb, '\r'); break; case '\\': sb_ch(sb, '\\'); break;
+                    case '"': sb_ch(sb, '"'); break; default: sb_ch(sb, lx->src[lx->pos]); break;
+                }
+            } else { sb_ch(sb, lx->src[lx->pos]); }
             lx->pos++; lx->col++;
         }
-        if (lx->pos >= lx->len || lx->src[lx->pos] == '\n') error_at(lx->line, lx->col, "unterminated string");
+        if (lx->pos >= lx->len || lx->src[lx->pos] == '\n')
+            dsc_error(lx->line, lx->col, "unterminated string");
         lx->pos++; lx->col++;
-        Token* tk = tk_new(TK_STR, s->data, lx->line, lx->col); dstr_free(s); return tk; }
+        Tok* tk = tok_new(TK_STR, sb->s, lx->line, lx->col);
+        sb_free(sb);
+        return tk;
+    }
 
-    if (isdigit(c)) { int is_float = 0, ln = lx->line, co = lx->col; DStr* s = dstr_new();
-        while (lx->pos < lx->len && isdigit(lx->src[lx->pos])) { dstr_addc(s, lx->src[lx->pos]); lx->pos++; lx->col++; }
-        if (lx->pos < lx->len && lx->src[lx->pos] == '.' && lx->pos+1 < lx->len && isdigit(lx->src[lx->pos+1])) {
-            is_float = 1; dstr_addc(s, '.'); lx->pos++; lx->col++;
-            while (lx->pos < lx->len && isdigit(lx->src[lx->pos])) { dstr_addc(s, lx->src[lx->pos]); lx->pos++; lx->col++; }
+    if (isdigit(c)) {
+        int fl = 0, ln = lx->line, co = lx->col;
+        SBuf* sb = sb_new();
+        while (lx->pos < lx->len && isdigit(lx->src[lx->pos])) { sb_ch(sb, lx->src[lx->pos]); lx->pos++; lx->col++; }
+        if (lx->pos + 1 < lx->len && lx->src[lx->pos] == '.' && isdigit(lx->src[lx->pos + 1])) {
+            fl = 1; sb_ch(sb, '.'); lx->pos++; lx->col++;
+            while (lx->pos < lx->len && isdigit(lx->src[lx->pos])) { sb_ch(sb, lx->src[lx->pos]); lx->pos++; lx->col++; }
         }
-        Token* tk = tk_new(is_float ? TK_FLT : TK_INT, s->data, ln, co); dstr_free(s); return tk; }
+        Tok* tk = tok_new(fl ? TK_FLT : TK_INT, sb->s, ln, co);
+        sb_free(sb);
+        return tk;
+    }
 
-    if (is_id0(c)) { int ln = lx->line, co = lx->col; DStr* s = dstr_new();
-        while (lx->pos < lx->len && is_id1(lx->src[lx->pos])) { dstr_addc(s, lx->src[lx->pos]); lx->pos++; lx->col++; }
-        int t = kw_lookup(s->data); Token* tk = tk_new(t, s->data, ln, co); dstr_free(s); return tk; }
+    if (isalpha(c) || c == '_') {
+        int ln = lx->line, co = lx->col;
+        SBuf* sb = sb_new();
+        while (lx->pos < lx->len && (isalnum(lx->src[lx->pos]) || lx->src[lx->pos] == '_')) {
+            sb_ch(sb, lx->src[lx->pos]); lx->pos++; lx->col++;
+        }
+        int t = lookup_kw(sb->s);
+        Tok* tk = tok_new(t, sb->s, ln, co);
+        sb_free(sb);
+        return tk;
+    }
 
-    if (c == '/' && lx->pos+1 < lx->len) {
-        if (lx->src[lx->pos+1] == '/') { while (lx->pos < lx->len && lx->src[lx->pos] != '\n') { lx->pos++; lx->col++; } return lex_one(lx); }
-        if (lx->src[lx->pos+1] == '*') { lx->pos += 2; lx->col += 2;
-            while (lx->pos+1 < lx->len && !(lx->src[lx->pos] == '*' && lx->src[lx->pos+1] == '/')) {
-                if (lx->src[lx->pos] == '\n') { lx->line++; lx->col = 1; } else lx->col++;
-                lx->pos++;
-            }
-            lx->pos += 2; lx->col += 2; return lex_one(lx); }
+    /* Comments: // or # */
+    if (c == '/' && lx->pos + 1 < lx->len && lx->src[lx->pos + 1] == '/') {
+        while (lx->pos < lx->len && lx->src[lx->pos] != '\n') lx->pos++;
+        return lex_one(lx);
+    }
+    if (c == '#') {
+        while (lx->pos < lx->len && lx->src[lx->pos] != '\n') lx->pos++;
+        return lex_one(lx);
     }
 
     int ln = lx->line, co = lx->col; lx->pos++; lx->col++;
     switch (c) {
-        case '+': return tk_new(TK_PLUS,"+",ln,co); case '-': return tk_new(TK_MINUS,"-",ln,co);
-        case '*': return tk_new(TK_STAR,"*",ln,co); case '/': return tk_new(TK_SLASH,"/",ln,co);
-        case '%': return tk_new(TK_PCT,"%",ln,co); case '(': return tk_new(TK_LP,"(",ln,co);
-        case ')': return tk_new(TK_RP,")",ln,co); case '[': return tk_new(TK_LB,"[",ln,co);
-        case ']': return tk_new(TK_RB,"]",ln,co); case '{': return tk_new(TK_LC,"{",ln,co);
-        case '}': return tk_new(TK_RC,"}",ln,co); case ':': return tk_new(TK_COLON,":",ln,co);
-        case ';': return tk_new(TK_SEMI,";",ln,co); case ',': return tk_new(TK_COMMA,",",ln,co);
-        case '.': return tk_new(TK_DOT,".",ln,co); case '#': return tk_new(TK_HASH,"#",ln,co);
-        case '&': return tk_new(TK_AMP,"&",ln,co); case '|': return tk_new(TK_PIPE,"|",ln,co);
-        case '!': if (lx->pos < lx->len && lx->src[lx->pos] == '=') { lx->pos++; lx->col++; return tk_new(TK_NEQ,"!=",ln,co); }
-                  return tk_new(TK_BANG,"!",ln,co);
-        case '=': if (lx->pos < lx->len && lx->src[lx->pos] == '=') { lx->pos++; lx->col++; return tk_new(TK_EQEQ,"==",ln,co); }
-                  return tk_new(TK_EQ,"=",ln,co);
-        case '<': if (lx->pos < lx->len && lx->src[lx->pos] == '=') { lx->pos++; lx->col++; return tk_new(TK_LTE,"<=",ln,co); }
-                  return tk_new(TK_LT,"<",ln,co);
-        case '>': if (lx->pos < lx->len && lx->src[lx->pos] == '=') { lx->pos++; lx->col++; return tk_new(TK_GTE,">=",ln,co); }
-                  return tk_new(TK_GT,">",ln,co);
-        default: error_at(ln, co, "unexpected char '%c' (0x%02x)", c, c);
+        case '+': return tok_new(TK_PLUS, "+", ln, co);
+        case '-': return tok_new(TK_MINUS, "-", ln, co);
+        case '*': return tok_new(TK_STAR, "*", ln, co);
+        case '/': return tok_new(TK_SLASH, "/", ln, co);
+        case '%': return tok_new(TK_PCT, "%", ln, co);
+        case '(': return tok_new(TK_LP, "(", ln, co);
+        case ')': return tok_new(TK_RP, ")", ln, co);
+        case '[': return tok_new(TK_LB, "[", ln, co);
+        case ']': return tok_new(TK_RB, "]", ln, co);
+        case '{': return tok_new(TK_LC, "{", ln, co);
+        case '}': return tok_new(TK_RC, "}", ln, co);
+        case ':': return tok_new(TK_COLON, ":", ln, co);
+        case ',': return tok_new(TK_COMMA, ",", ln, co);
+        case '.': return tok_new(TK_DOT, ".", ln, co);
+        case '&': return tok_new(KW_AND, "&", ln, co);
+        case '|': return tok_new(KW_OR, "|", ln, co);
+        case '!':
+            if (lx->pos < lx->len && lx->src[lx->pos] == '=') { lx->pos++; lx->col++; return tok_new(TK_NEQ, "!=", ln, co); }
+            return tok_new(KW_NOT, "!", ln, co);
+        case '=':
+            if (lx->pos < lx->len && lx->src[lx->pos] == '=') { lx->pos++; lx->col++; return tok_new(TK_EQEQ, "==", ln, co); }
+            return tok_new(TK_EQ, "=", ln, co);
+        case '<':
+            if (lx->pos < lx->len && lx->src[lx->pos] == '=') { lx->pos++; lx->col++; return tok_new(TK_LTE, "<=", ln, co); }
+            return tok_new(TK_LT, "<", ln, co);
+        case '>':
+            if (lx->pos < lx->len && lx->src[lx->pos] == '=') { lx->pos++; lx->col++; return tok_new(TK_GTE, ">=", ln, co); }
+            return tok_new(TK_GT, ">", ln, co);
+        default:
+            dsc_error(ln, co, "unexpected character '%c'", c);
     }
     return NULL;
 }
 
-/* Tokenize: produce flat token array with INDENT/DEDENT inserted */
-static Token** tokenize(const char* src, int* count) {
-    int cap = 256, len = 0;
-    Token** toks = malloc(sizeof(Token*) * cap);
-    Lexer lx = {src, 0, (int)strlen(src), 1, 1};
-
-    int* istack = malloc(sizeof(int) * 64); int idepth = 0; istack[idepth++] = 0;
+static Tok** tokenize(const char* src, int* out_count) {
+    int cap = 512, n = 0;
+    Tok** toks = malloc(sizeof(Tok*) * cap);
+    Lxr lx = {src, 0, (int)strlen(src), 1, 1};
+    int istk[64], id = 1; istk[0] = 0;
     int at_bol = 1;
 
     while (1) {
         if (at_bol) {
             int indent = 0;
-            while (lx.pos < lx.len) { if (lx.src[lx.pos] == ' ') { indent++; lx.pos++; lx.col++; } else if (lx.src[lx.pos] == '\t') { indent += 4; lx.pos++; lx.col++; } else break; }
-            /* skip blank lines & comment lines */
-            if (lx.pos >= lx.len) break; /* EOF with no more content */
+            while (lx.pos < lx.len && (lx.src[lx.pos] == ' ' || lx.src[lx.pos] == '\t')) {
+                indent += (lx.src[lx.pos] == '\t') ? 4 : 1;
+                lx.pos++; lx.col++;
+            }
+            if (lx.pos >= lx.len) break;
             if (lx.src[lx.pos] == '\n' || lx.src[lx.pos] == '\r') {
                 if (lx.src[lx.pos] == '\r') lx.pos++;
                 if (lx.pos < lx.len && lx.src[lx.pos] == '\n') lx.pos++;
-                lx.line++; lx.col = 1; continue;
+                lx.line++; lx.col = 1;
+                continue;
             }
-            if (lx.src[lx.pos] == '/' && lx.pos+1 < lx.len && (lx.src[lx.pos+1] == '/' || lx.src[lx.pos+1] == '*')) {
-                Token* t = lex_one(&lx); tk_free(t); at_bol = (lx.pos < lx.len && lx.src[lx.pos-1] == '\n'); continue;
+            /* Comment-only line */
+            if (lx.src[lx.pos] == '#' ||
+                (lx.src[lx.pos] == '/' && lx.pos + 1 < lx.len && lx.src[lx.pos + 1] == '/')) {
+                Tok* t = lex_one(&lx); tok_free(t);
+                continue;
             }
-            /* handle indent/dedent */
-            int cur = istack[idepth-1];
-            if (indent > cur) { if (len >= cap) { cap *= 2; toks = realloc(toks, sizeof(Token*)*cap); } toks[len++] = tk_new(TK_INDENT,"",lx.line,lx.col); istack[idepth++] = indent; cur = indent; }
-            while (indent < cur) { if (len >= cap) { cap *= 2; toks = realloc(toks, sizeof(Token*)*cap); } toks[len++] = tk_new(TK_DEDENT,"",lx.line,lx.col); idepth--; cur = istack[idepth-1]; }
-            if (indent != cur) error_at(lx.line, lx.col, "inconsistent indentation");
+            int cur = istk[id - 1];
+            if (indent > cur) {
+                if (n >= cap) { cap *= 2; toks = realloc(toks, sizeof(Tok*) * cap); }
+                toks[n++] = tok_new(TK_INDENT, "", lx.line, lx.col);
+                if (id < 64) istk[id++] = indent;
+                cur = indent;
+            }
+            while (indent < cur && id > 1) {
+                if (n >= cap) { cap *= 2; toks = realloc(toks, sizeof(Tok*) * cap); }
+                toks[n++] = tok_new(TK_DEDENT, "", lx.line, lx.col);
+                id--; cur = istk[id - 1];
+            }
+            if (indent != cur) dsc_error(lx.line, lx.col, "inconsistent indentation");
             at_bol = 0;
         }
-        Token* t = lex_one(&lx);
-        if (t->type == TK_EOF) { tk_free(t); break; }
+
+        Tok* t = lex_one(&lx);
+        if (t->type == TK_EOF) { tok_free(t); break; }
         if (t->type == TK_NL) at_bol = 1;
-        if (len >= cap) { cap *= 2; toks = realloc(toks, sizeof(Token*)*cap); }
-        toks[len++] = t;
+        if (n >= cap) { cap *= 2; toks = realloc(toks, sizeof(Tok*) * cap); }
+        toks[n++] = t;
     }
-    /* trailing DEDENTs */
-    while (idepth > 1) {
-        if (len >= cap) { cap *= 2; toks = realloc(toks, sizeof(Token*)*cap); }
-        toks[len++] = tk_new(TK_DEDENT,"",lx.line,lx.col); idepth--;
+
+    while (id > 1) {
+        if (n >= cap) { cap *= 2; toks = realloc(toks, sizeof(Tok*) * cap); }
+        toks[n++] = tok_new(TK_DEDENT, "", lx.line, lx.col);
+        id--;
     }
-    /* final EOF */
-    if (len >= cap) { cap *= 2; toks = realloc(toks, sizeof(Token*)*cap); }
-    toks[len++] = tk_new(TK_EOF,"",lx.line,lx.col);
-    free(istack);
-    *count = len;
+    if (n >= cap) { cap *= 2; toks = realloc(toks, sizeof(Tok*) * cap); }
+    toks[n++] = tok_new(TK_EOF, "", lx.line, lx.col);
+    *out_count = n;
     return toks;
 }
 
 /* ================================================================
- *  AST nodes
+ *  Section 3: AST
  * ================================================================ */
+
 enum {
-    N_PROG, N_VAR, N_ASSIGN, N_IF, N_WHL, N_FOR, N_FN, N_RET, N_BLOCK,
-    N_PRT, N_INP, N_BINOP, N_UNOP, N_ID, N_INT, N_FLT, N_STR, N_BOOL,
-    N_CALL, N_ARR, N_IDX, N_FLD, N_ARR_LEN, N_STRUCT, N_STRUCT_LIT,
+    ND_PROG, ND_VAR, ND_ASSIGN, ND_IF, ND_WHILE, ND_FOR, ND_FN, ND_RET, ND_BLOCK,
+    ND_PRINT, ND_BINOP, ND_UNOP, ND_ID, ND_INT, ND_FLT, ND_STR, ND_BOOL,
+    ND_CALL, ND_ARR, ND_IDX, ND_FLD, ND_CLASS, ND_CLASS_LIT,
 };
 
-/* type tags for data_type field */
-enum { T_NONE=0, T_INT, T_FLT, T_STR, T_BOL, T_VOID, T_STRUCT };
+enum { TY_NONE = 0, TY_INT, TY_FLT, TY_STR, TY_BOL, TY_VOID, TY_CLASS };
 
-typedef struct ASTNode {
-    int kind, dtype;
-    char* sval;       /* identifier name / string value / struct name */
-    int64_t ival;     /* int literal */
-    double fval;      /* float literal */
-    struct ASTNode *a, *b, *c, *d, *next;
+typedef struct Node {
+    int kind, ty;
+    char* name;
+    int64_t ival;
+    double fval;
+    struct Node *a, *b, *c, *d, *next;
     int line, col;
-} AST;
+} Node;
 
-static AST* ast_new(int kind, int ln, int co) {
-    AST* n = calloc(1, sizeof(AST)); n->kind = kind; n->dtype = T_NONE; n->line = ln; n->col = co; return n;
+static Node* nd_new(int kind, int ln, int co) {
+    Node* n = calloc(1, sizeof(Node)); n->kind = kind; n->ty = TY_NONE; n->line = ln; n->col = co; return n;
 }
-static AST* ast_id(const char* name, int ln, int co) { AST* n = ast_new(N_ID, ln, co); n->sval = strdup(name); n->dtype = T_NONE; return n; }
-static AST* ast_int(int64_t v, int ln, int co) { AST* n = ast_new(N_INT, ln, co); n->ival = v; n->dtype = T_INT; return n; }
-static AST* ast_flt(double v, int ln, int co) { AST* n = ast_new(N_FLT, ln, co); n->fval = v; n->dtype = T_FLT; return n; }
-static AST* ast_str(const char* s, int ln, int co) { AST* n = ast_new(N_STR, ln, co); n->sval = strdup(s); n->dtype = T_STR; return n; }
-static AST* ast_bool(int v, int ln, int co) { AST* n = ast_new(N_BOOL, ln, co); n->ival = v; n->dtype = T_BOL; return n; }
-static AST* ast_binop(int opkind, AST* l, AST* r, int ln, int co) { AST* n = ast_new(N_BINOP, ln, co); n->ival = opkind; n->a = l; n->b = r; return n; }
-static AST* ast_unop(int opkind, AST* x, int ln, int co) { AST* n = ast_new(N_UNOP, ln, co); n->ival = opkind; n->a = x; return n; }
+static Node* nd_id(const char* n, int ln, int co) { Node* x = nd_new(ND_ID, ln, co); x->name = strdup(n); return x; }
+static Node* nd_int_v(int64_t v, int ln, int co) { Node* x = nd_new(ND_INT, ln, co); x->ival = v; x->ty = TY_INT; return x; }
+static Node* nd_flt_v(double v, int ln, int co) { Node* x = nd_new(ND_FLT, ln, co); x->fval = v; x->ty = TY_FLT; return x; }
+static Node* nd_str_v(const char* v, int ln, int co) { Node* x = nd_new(ND_STR, ln, co); x->name = strdup(v); x->ty = TY_STR; return x; }
+static Node* nd_bool_v(int v, int ln, int co) { Node* x = nd_new(ND_BOOL, ln, co); x->ival = v; x->ty = TY_BOL; return x; }
+static Node* nd_binop(int op, Node* l, Node* r, int ln, int co) { Node* x = nd_new(ND_BINOP, ln, co); x->ival = op; x->a = l; x->b = r; return x; }
+static Node* nd_unop(int op, Node* ch, int ln, int co) { Node* x = nd_new(ND_UNOP, ln, co); x->ival = op; x->a = ch; return x; }
 
 /* ================================================================
- *  Symbol table (simple linear-scan per scope)
+ *  Section 4: Symbol Table
  * ================================================================ */
-typedef struct Sym { char* name; int dtype; int is_fn; AST* fn_ast; } Sym;
+
+typedef struct { char* name; int ty; int is_fn; } Sym;
 typedef struct Scope { Sym* syms; int count, cap; struct Scope* parent; } Scope;
 
-static Scope* scope_new(Scope* parent) { Scope* s = calloc(1,sizeof(Scope)); s->cap=32; s->syms=malloc(sizeof(Sym)*32); s->parent=parent; return s; }
-static Sym* scope_lookup(Scope* s, const char* name) {
-    for (int i = 0; i < s->count; i++) if (!strcmp(s->syms[i].name, name)) return &s->syms[i];
-    return s->parent ? scope_lookup(s->parent, name) : NULL;
+static Scope* sc_new(Scope* par) {
+    Scope* s = calloc(1, sizeof(Scope));
+    s->cap = 32; s->syms = malloc(sizeof(Sym) * 32); s->parent = par;
+    return s;
 }
-static Sym* scope_add(Scope* s, const char* name, int dtype, int is_fn) {
-    Sym* existing = NULL;
-    for (int i = 0; i < s->count; i++) if (!strcmp(s->syms[i].name, name)) { existing = &s->syms[i]; break; }
-    if (existing) { existing->dtype = dtype; existing->is_fn = is_fn; return existing; }
-    if (s->count >= s->cap) { s->cap *= 2; s->syms = realloc(s->syms, sizeof(Sym)*s->cap); }
-    Sym* sym = &s->syms[s->count++]; sym->name = strdup(name); sym->dtype = dtype; sym->is_fn = is_fn; sym->fn_ast = NULL;
-    return sym;
+
+static Sym* sc_find(Scope* s, const char* name) {
+    for (int i = 0; i < s->count; i++)
+        if (!strcmp(s->syms[i].name, name)) return &s->syms[i];
+    return s->parent ? sc_find(s->parent, name) : NULL;
+}
+
+static void sc_add(Scope* s, const char* name, int ty, int is_fn) {
+    for (int i = 0; i < s->count; i++)
+        if (!strcmp(s->syms[i].name, name)) { s->syms[i].ty = ty; s->syms[i].is_fn = is_fn; return; }
+    if (s->count >= s->cap) { s->cap *= 2; s->syms = realloc(s->syms, sizeof(Sym) * s->cap); }
+    s->syms[s->count].name = strdup(name); s->syms[s->count].ty = ty; s->syms[s->count].is_fn = is_fn;
+    s->count++;
+}
+
+static void sc_free(Scope* s) {
+    if (!s) return;
+    for (int i = 0; i < s->count; i++) free(s->syms[i].name);
+    free(s->syms);
+    sc_free(s->parent);
+    free(s);
 }
 
 /* ================================================================
- *  Parser (recursive descent)
+ *  Section 5: Parser
  * ================================================================ */
-typedef struct {
-    Token** toks; int pos, count;
-    Scope *global, *local;
-} Parser;
 
-static Token* peek(Parser* p) { return p->pos < p->count ? p->toks[p->pos] : NULL; }
-static Token* next(Parser* p) { return p->pos+1 < p->count ? p->toks[p->pos+1] : NULL; }
-static Token* consume(Parser* p) { return p->pos < p->count ? p->toks[p->pos++] : NULL; }
-static int check(Parser* p, int t) { Token* tk = peek(p); return tk && tk->type == t; }
-static int check_kw_type(Parser* p) { Token* tk = peek(p); return tk && (tk->type == KW_INT||tk->type==KW_FLT||tk->type==KW_STR||tk->type==KW_BOL); }
-static Token* expect(Parser* p, int t) { if (check(p, t)) return consume(p); Token* tk = peek(p); error_at(tk?tk->line:0, tk?tk->col:0, "expected %s, got %s", tk_names[t], tk?tk_names[tk->type]:"?"); return NULL; }
+typedef struct { Tok** toks; int pos, count; Scope* global; Scope* local; } Parser;
 
-/* Forward declarations */
-static AST* parse_expr(Parser* p);
-static AST* parse_statement(Parser* p);
-static AST* parse_block(Parser* p);
+#define peek(p) ((p)->pos < (p)->count ? (p)->toks[(p)->pos] : NULL)
+#define nxt_tok(p) ((p)->pos + 1 < (p)->count ? (p)->toks[(p)->pos + 1] : NULL)
+#define consume(p) ((p)->pos < (p)->count ? (p)->toks[(p)->pos++] : NULL)
+#define is_(p, t) (peek(p) && peek(p)->type == (t))
+#define is_typ_kw(p) (peek(p) && (peek(p)->type == KW_INT || peek(p)->type == KW_FLT || peek(p)->type == KW_STR || peek(p)->type == KW_BOL))
 
-static int type_kw_to_dtype(int kw) {
-    switch (kw) { case KW_INT: return T_INT; case KW_FLT: return T_FLT; case KW_STR: return T_STR; case KW_BOL: return T_BOL; default: return T_INT; }
-}
-
-static const char* dtype_to_cstr(int dt) {
-    switch (dt) { case T_INT: return "int64_t"; case T_FLT: return "double"; case T_STR: return "const char*"; case T_BOL: return "int"; case T_VOID: return "void"; default: return "int64_t"; }
-}
-
-/* Determine result type of binary operation */
-static int binop_dtype(int a, int b, int op) {
-    if (op == N_BINOP && 0) {} /* placeholder */
-    switch (op) {
-        case TK_PLUS: if (a==T_STR||b==T_STR) return T_STR; if (a==T_FLT||b==T_FLT) return T_FLT; return T_INT;
-        case TK_MINUS: case TK_STAR: case TK_SLASH: case TK_PCT:
-            if (a==T_FLT||b==T_FLT) return T_FLT; return T_INT;
-        case TK_EQEQ: case TK_NEQ: case TK_LT: case TK_GT: case TK_LTE: case TK_GTE: return T_BOL;
-        case TK_AMP: case TK_PIPE: return T_BOL;
-        default: return T_INT;
-    }
-}
-
-/* ---- Expression parser ---- */
-static AST* parse_primary(Parser* p) {
-    Token* tk = peek(p);
-    if (!tk) error_at(0,0,"unexpected EOF");
-
-    if (tk->type == TK_INT) { consume(p); return ast_int(strtoll(tk->text,NULL,10), tk->line, tk->col); }
-    if (tk->type == TK_FLT) { consume(p); return ast_flt(strtod(tk->text,NULL), tk->line, tk->col); }
-    if (tk->type == TK_STR) { consume(p); return ast_str(tk->text, tk->line, tk->col); }
-    if (tk->type == KW_TRU) { consume(p); return ast_bool(1, tk->line, tk->col); }
-    if (tk->type == KW_FAL) { consume(p); return ast_bool(0, tk->line, tk->col); }
-
-    if (tk->type == TK_HASH) { consume(p); Token* id = expect(p, TK_IDENT); AST* n = ast_new(N_ARR_LEN, id->line, id->col); n->sval = strdup(id->text);
-        Sym* s = scope_lookup(p->local, id->text); if (!s) error_at(id->line, id->col, "undefined '%s'", id->text); n->dtype = T_INT; return n; }
-
-    if (tk->type == TK_IDENT || tk->type == KW_PRT || tk->type == KW_INP) { char* name = strdup(tk->text); consume(p);
-        if (check(p, TK_LP)) { /* function call */
-            consume(p); AST* n = ast_new(N_CALL, tk->line, tk->col); n->sval = name;
-            if (!check(p, TK_RP)) {
-                AST** tail = &n->a;
-                do { *tail = parse_expr(p); tail = &(*tail)->next; } while (check(p, TK_COMMA) && (consume(p),1));
-            }
-            expect(p, TK_RP);
-            Sym* s = scope_lookup(p->global, name); n->dtype = s ? s->dtype : T_INT;
-            return n;
-        }
-        /* check for struct literal: Name{ ... } */
-        if (check(p, TK_LC)) {
-            consume(p); AST* n = ast_new(N_STRUCT_LIT, tk->line, tk->col); n->sval = name;
-            if (!check(p, TK_RC)) {
-                AST** tail = &n->a;
-                do {
-                    Token* fn = expect(p, TK_IDENT); expect(p, TK_COLON);
-                    AST* fld = ast_new(N_FLD, fn->line, fn->col); fld->sval = strdup(fn->text); fld->a = parse_expr(p);
-                    *tail = fld; tail = &fld->next;
-                } while (check(p, TK_COMMA) && (consume(p),1));
-            }
-            expect(p, TK_RC); n->dtype = T_STRUCT; return n;
-        }
-        /* plain identifier */
-        AST* idn = ast_id(name, tk->line, tk->col);
-        Sym* s = scope_lookup(p->local, name); if (!s) s = scope_lookup(p->global, name);
-        if (s) idn->dtype = s->dtype; else error_at(tk->line, tk->col, "undefined variable '%s'", name);
-        free(name); return idn;
-    }
-
-    if (tk->type == TK_LP) { consume(p); AST* e = parse_expr(p); expect(p, TK_RP); return e; }
-
-    if (tk->type == TK_LB) { consume(p); AST* n = ast_new(N_ARR, tk->line, tk->col);
-        if (!check(p, TK_RB)) { AST** tail = &n->a; do { *tail = parse_expr(p); tail = &(*tail)->next; } while (check(p, TK_COMMA) && (consume(p),1)); }
-        expect(p, TK_RB); n->dtype = T_INT; return n; }
-
-    if (tk->type == KW_INP) { consume(p); AST* n = ast_new(N_INP, tk->line, tk->col);
-        expect(p, TK_LP); if (check(p, TK_STR)) n->a = ast_str(consume(p)->text, tk->line, tk->col);
-        expect(p, TK_RP); n->dtype = T_INT; return n; }
-
-    error_at(tk->line, tk->col, "unexpected token '%s'", tk_names[tk->type]);
+static Tok* expect_tok(Parser* p, int t) {
+    if (is_(p, t)) return consume(p);
+    Tok* tk = peek(p);
+    dsc_error(tk ? tk->line : 0, tk ? tk->col : 0, "expected %s, got %s", tk_name(t), tk ? tk_name(tk->type) : "EOF");
     return NULL;
 }
 
-static AST* parse_postfix(Parser* p) {
-    AST* e = parse_primary(p);
+static int typ_kw_to_int(int kw) {
+    switch (kw) { case KW_INT: return TY_INT; case KW_FLT: return TY_FLT; case KW_STR: return TY_STR; case KW_BOL: return TY_BOL; default: return TY_INT; }
+}
+
+/* Forward declarations for recursive descent */
+static Node* parse_expr(Parser* p);
+static Node* parse_stmt(Parser* p);
+static Node* parse_block(Parser* p);
+
+/* --- Primary --- */
+static Node* parse_unary(Parser* p);
+
+static Node* parse_primary(Parser* p) {
+    Tok* tk = peek(p);
+    if (!tk) dsc_error(0, 0, "unexpected end of input");
+
+    if (tk->type == TK_INT) { consume(p); return nd_int_v(strtoll(tk->text, NULL, 10), tk->line, tk->col); }
+    if (tk->type == TK_FLT) { consume(p); return nd_flt_v(strtod(tk->text, NULL), tk->line, tk->col); }
+    if (tk->type == TK_STR) { consume(p); return nd_str_v(tk->text, tk->line, tk->col); }
+    if (tk->type == KW_TRUE) { consume(p); return nd_bool_v(1, tk->line, tk->col); }
+    if (tk->type == KW_FALSE) { consume(p); return nd_bool_v(0, tk->line, tk->col); }
+
+    if (tk->type == TK_LP) {
+        consume(p);
+        Node* e = parse_expr(p);
+        expect_tok(p, TK_RP);
+        return e;
+    }
+
+    if (tk->type == TK_LB) {
+        consume(p);
+        Node* arr = nd_new(ND_ARR, tk->line, tk->col);
+        Node** tail = &arr->a;
+        if (!is_(p, TK_RB)) {
+            do { *tail = parse_expr(p); tail = &(*tail)->next; } while (is_(p, TK_COMMA) && (consume(p), 1));
+        }
+        expect_tok(p, TK_RB);
+        return arr;
+    }
+
+    if (tk->type == TK_ID) {
+        char* nm = strdup(tk->text);
+        int ln = tk->line, co = tk->col;
+        consume(p);
+
+        /* Function call: name( */
+        if (is_(p, TK_LP)) {
+            consume(p);
+            Node* call = nd_new(ND_CALL, ln, co);
+            call->name = nm;
+            if (!is_(p, TK_RP)) {
+                Node** tail = &call->a;
+                do { *tail = parse_expr(p); tail = &(*tail)->next; } while (is_(p, TK_COMMA) && (consume(p), 1));
+            }
+            expect_tok(p, TK_RP);
+            return call;
+        }
+
+        /* Class literal: Name{ field: expr, ... } */
+        if (is_(p, TK_LC)) {
+            consume(p);
+            Node* cl = nd_new(ND_CLASS_LIT, ln, co);
+            cl->name = nm;
+            Node** tail = &cl->a;
+            if (!is_(p, TK_RC)) {
+                do {
+                    Tok* fn = expect_tok(p, TK_ID);
+                    expect_tok(p, TK_COLON);
+                    Node* fld = nd_new(ND_FLD, fn->line, fn->col);
+                    fld->name = strdup(fn->text);
+                    fld->a = parse_expr(p);
+                    *tail = fld; tail = &fld->next;
+                } while (is_(p, TK_COMMA) && (consume(p), 1));
+            }
+            expect_tok(p, TK_RC);
+            cl->ty = TY_CLASS;
+            return cl;
+        }
+
+        /* Plain identifier — lookup deferred to compiler */
+        Node* id = nd_id(nm, ln, co);
+        Sym* s = sc_find(p->local, nm);
+        if (!s) s = sc_find(p->global, nm);
+        if (s) id->ty = s->ty;
+        /* If not found, ty stays TY_NONE — compiler will resolve it */
+        free(nm);
+        return id;
+    }
+
+    dsc_error(tk->line, tk->col, "unexpected token '%s'", tk_name(tk->type));
+    return NULL;
+}
+
+/* --- Unary (not, -) --- */
+static Node* parse_unary(Parser* p) {
+    Tok* tk = peek(p);
+    if (!tk) dsc_error(0, 0, "unexpected EOF");
+
+    if (tk->type == KW_NOT) {
+        consume(p);
+        Node* x = parse_unary(p);
+        Node* n = nd_unop(KW_NOT, x, tk->line, tk->col);
+        n->ty = TY_BOL;
+        return n;
+    }
+
+    if (tk->type == TK_MINUS) {
+        consume(p);
+        Node* x = parse_unary(p);
+        Node* n = nd_unop(TK_MINUS, x, tk->line, tk->col);
+        n->ty = x->ty;
+        return n;
+    }
+
+    return parse_primary(p);
+}
+
+/* --- Postfix (index, field) --- */
+static Node* parse_postfix(Parser* p) {
+    Node* e = parse_unary(p);
     while (1) {
-        if (check(p, TK_LB)) { consume(p); AST* idx = parse_expr(p); expect(p, TK_RB); AST* n = ast_new(N_IDX, e->line, e->col); n->a = e; n->b = idx; n->dtype = T_INT; e = n; }
-        else if (check(p, TK_DOT)) { consume(p); Token* fld = expect(p, TK_IDENT); AST* n = ast_new(N_FLD, e->line, e->col); n->sval = strdup(fld->text); n->a = e; n->dtype = T_INT; e = n; }
-        else break;
+        if (is_(p, TK_LB)) {
+            consume(p);
+            Node* idx = parse_expr(p);
+            expect_tok(p, TK_RB);
+            Node* n = nd_new(ND_IDX, e->line, e->col);
+            n->a = e; n->b = idx;
+            e = n;
+        } else if (is_(p, TK_DOT)) {
+            consume(p);
+            Tok* fn = expect_tok(p, TK_ID);
+            Node* n = nd_new(ND_FLD, e->line, e->col);
+            n->name = strdup(fn->text); n->a = e;
+            e = n;
+        } else break;
     }
     return e;
 }
 
-static AST* parse_unary(Parser* p) {
-    Token* tk = peek(p);
-    if (tk && (tk->type == TK_MINUS || tk->type == TK_BANG)) {
-        int op = consume(p)->type; AST* x = parse_unary(p);
-        AST* n = ast_unop(op == TK_MINUS ? TK_MINUS : TK_BANG, x, tk->line, tk->col);
-        n->dtype = (op == TK_MINUS) ? x->dtype : T_BOL; return n;
+/* --- Precedence climbing --- */
+static Node* parse_mul(Parser* p) {
+    Node* e = parse_postfix(p);
+    while (is_(p, TK_STAR) || is_(p, TK_SLASH) || is_(p, TK_PCT)) {
+        int op = consume(p)->type;
+        Node* r = parse_postfix(p);
+        e = nd_binop(op, e, r, e->line, e->col);
     }
-    return parse_postfix(p);
+    return e;
 }
 
-static AST* parse_mul(Parser* p) { AST* e = parse_unary(p); while (check(p,TK_STAR)||check(p,TK_SLASH)||check(p,TK_PCT)) { int op = consume(p)->type; AST* r = parse_unary(p); AST* n = ast_binop(op,e,r,e->line,e->col); n->dtype = binop_dtype(e->dtype,r->dtype,op); e = n; } return e; }
-static AST* parse_add(Parser* p) { AST* e = parse_mul(p); while (check(p,TK_PLUS)||check(p,TK_MINUS)) { int op = consume(p)->type; AST* r = parse_mul(p); AST* n = ast_binop(op,e,r,e->line,e->col); n->dtype = binop_dtype(e->dtype,r->dtype,op); e = n; } return e; }
-static AST* parse_rel(Parser* p) { AST* e = parse_add(p); while (check(p,TK_LT)||check(p,TK_GT)||check(p,TK_LTE)||check(p,TK_GTE)) { int op = consume(p)->type; AST* r = parse_add(p); AST* n = ast_binop(op,e,r,e->line,e->col); n->dtype = T_BOL; e = n; } return e; }
-static AST* parse_eq(Parser* p) { AST* e = parse_rel(p); while (check(p,TK_EQEQ)||check(p,TK_NEQ)) { int op = consume(p)->type; AST* r = parse_rel(p); AST* n = ast_binop(op,e,r,e->line,e->col); n->dtype = T_BOL; e = n; } return e; }
-static AST* parse_and(Parser* p) { AST* e = parse_eq(p); while (check(p,TK_AMP)) { consume(p); AST* r = parse_eq(p); AST* n = ast_binop(TK_AMP,e,r,e->line,e->col); n->dtype = T_BOL; e = n; } return e; }
-static AST* parse_or(Parser* p) { AST* e = parse_and(p); while (check(p,TK_PIPE)) { consume(p); AST* r = parse_and(p); AST* n = ast_binop(TK_PIPE,e,r,e->line,e->col); n->dtype = T_BOL; e = n; } return e; }
-static AST* parse_expr(Parser* p) { return parse_or(p); }
-
-/* ---- Statement parser ---- */
-static AST* parse_type_annot(Parser* p) {
-    if (check_kw_type(p)) return ast_int(type_kw_to_dtype(consume(p)->type), 0, 0);
-    if (check(p, TK_IDENT)) { AST* n = ast_new(N_ID, peek(p)->line, peek(p)->col); n->sval = strdup(consume(p)->text); n->dtype = T_STRUCT; return n; }
-    return NULL;
+static Node* parse_add(Parser* p) {
+    Node* e = parse_mul(p);
+    while (is_(p, TK_PLUS) || is_(p, TK_MINUS)) {
+        int op = consume(p)->type;
+        Node* r = parse_mul(p);
+        e = nd_binop(op, e, r, e->line, e->col);
+    }
+    return e;
 }
 
-static AST* parse_var_decl(Parser* p) {
-    Token* lt = expect(p, KW_LET); Token* nm = expect(p, TK_IDENT);
-    AST* ta = NULL;
-    if (check(p, TK_COLON)) { consume(p); ta = parse_type_annot(p); }
-    expect(p, TK_EQ);
-    AST* init = parse_expr(p);
-    AST* n = ast_new(N_VAR, lt->line, lt->col); n->sval = strdup(nm->text); n->a = init; n->b = ta;
-    int dt = ta ? (ta->kind == N_ID ? T_STRUCT : (int)ta->ival) : init->dtype;
-    n->dtype = dt;
-    scope_add(p->local, nm->text, dt, 0);
+static Node* parse_cmp(Parser* p) {
+    Node* e = parse_add(p);
+    while (is_(p, TK_LT) || is_(p, TK_GT) || is_(p, TK_LTE) || is_(p, TK_GTE)) {
+        int op = consume(p)->type;
+        Node* r = parse_add(p);
+        Node* n = nd_binop(op, e, r, e->line, e->col);
+        n->ty = TY_BOL;
+        e = n;
+    }
+    return e;
+}
+
+static Node* parse_eq2(Parser* p) {
+    Node* e = parse_cmp(p);
+    while (is_(p, TK_EQEQ) || is_(p, TK_NEQ)) {
+        int op = consume(p)->type;
+        Node* r = parse_cmp(p);
+        Node* n = nd_binop(op, e, r, e->line, e->col);
+        n->ty = TY_BOL;
+        e = n;
+    }
+    return e;
+}
+
+static Node* parse_and2(Parser* p) {
+    Node* e = parse_eq2(p);
+    while (is_(p, KW_AND)) {
+        int op = consume(p)->type;
+        Node* r = parse_eq2(p);
+        Node* n = nd_binop(op, e, r, e->line, e->col);
+        n->ty = TY_BOL;
+        e = n;
+    }
+    return e;
+}
+
+static Node* parse_or2(Parser* p) {
+    Node* e = parse_and2(p);
+    while (is_(p, KW_OR)) {
+        int op = consume(p)->type;
+        Node* r = parse_and2(p);
+        Node* n = nd_binop(op, e, r, e->line, e->col);
+        n->ty = TY_BOL;
+        e = n;
+    }
+    return e;
+}
+
+static Node* parse_expr(Parser* p) {
+    return parse_or2(p);
+}
+
+/* --- Statements --- */
+
+static Node* parse_assign(Parser* p, Node* lv) {
+    Node* n = nd_new(ND_ASSIGN, lv->line, lv->col);
+    n->a = lv; n->b = parse_expr(p);
     return n;
 }
 
-static AST* parse_assignment(Parser* p, AST* lv) {
-    AST* n = ast_new(N_ASSIGN, lv->line, lv->col); n->a = lv; n->b = parse_expr(p);
-    n->dtype = lv->dtype; return n;
-}
-
-static AST* parse_if(Parser* p) {
-    Token* tk = consume(p); /* if */
-    AST* cond = parse_expr(p);
-    AST* n = ast_new(N_IF, tk->line, tk->col); n->a = cond; n->b = parse_block(p);
-    AST** tail = &n->c;
-    while (check(p, KW_ELS)) {
-        Token* ek = consume(p);
-        if (check(p, KW_IF)) {
-            consume(p); AST* eif = ast_new(N_IF, ek->line, ek->col); eif->a = parse_expr(p); eif->b = parse_block(p);
+static Node* parse_if(Parser* p) {
+    Tok* tk = consume(p);
+    Node* cond = parse_expr(p);
+    Node* n = nd_new(ND_IF, tk->line, tk->col);
+    n->a = cond; n->b = parse_block(p);
+    Node** tail = &n->c;
+    while (is_(p, KW_ELS)) {
+        Tok* ek = consume(p);
+        if (is_(p, KW_IF)) {
+            consume(p);
+            Node* eif = nd_new(ND_IF, ek->line, ek->col);
+            eif->a = parse_expr(p);
+            eif->b = parse_block(p);
             *tail = eif; tail = &eif->c;
         } else {
-            *tail = parse_block(p); break;
+            *tail = parse_block(p);
+            break;
         }
     }
     return n;
 }
 
-static AST* parse_while(Parser* p) {
-    Token* tk = consume(p); AST* cond = parse_expr(p);
-    AST* n = ast_new(N_WHL, tk->line, tk->col); n->a = cond; n->b = parse_block(p); return n;
+static Node* parse_while(Parser* p) {
+    Tok* tk = consume(p);
+    Node* cond = parse_expr(p);
+    Node* n = nd_new(ND_WHILE, tk->line, tk->col);
+    n->a = cond; n->b = parse_block(p);
+    return n;
 }
 
-static AST* parse_for(Parser* p) {
-    Token* tk = consume(p); /* for */
-    /* Create a temporary scope for loop variable */
-    AST* init = NULL;
-    if (check(p, KW_LET)) init = parse_var_decl(p);
-    else { Token* id = expect(p, TK_IDENT); expect(p, TK_EQ); AST* lv = ast_id(id->text, id->line, id->col); init = parse_assignment(p, lv); }
-    expect(p, TK_SEMI);
-    AST* cond = parse_expr(p);
-    expect(p, TK_SEMI);
-    Token* uid = expect(p, TK_IDENT); expect(p, TK_EQ);
-    AST* lv2 = ast_id(uid->text, uid->line, uid->col); AST* upd = parse_assignment(p, lv2);
-    AST* n = ast_new(N_FOR, tk->line, tk->col); n->a = init; n->b = cond; n->c = upd; n->d = parse_block(p); return n;
+static Node* parse_for(Parser* p) {
+    Tok* tk = consume(p);
+    Tok* var = expect_tok(p, TK_ID);
+    expect_tok(p, KW_IN);
+    expect_tok(p, KW_RANGE);
+    expect_tok(p, TK_LP);
+    Node* limit = parse_expr(p);
+    expect_tok(p, TK_RP);
+    Node* n = nd_new(ND_FOR, tk->line, tk->col);
+    n->name = strdup(var->text);
+    n->a = limit;
+    n->b = parse_block(p);
+    return n;
 }
 
-static AST* parse_fn_def(Parser* p) {
-    Token* tk = consume(p); /* fn */
-    Token* nm = expect(p, TK_IDENT);
-    expect(p, TK_LP);
-    AST* fn = ast_new(N_FN, tk->line, tk->col); fn->sval = strdup(nm->text);
-    /* collect params into a linked list */
-    AST** ptail = &fn->a;
-    if (!check(p, TK_RP)) {
+static Node* parse_def(Parser* p) {
+    Tok* tk = consume(p);
+    Tok* nm = expect_tok(p, TK_ID);
+    Node* fn = nd_new(ND_FN, tk->line, tk->col);
+    fn->name = strdup(nm->text);
+    Node** tail = &fn->a;
+    expect_tok(p, TK_LP);
+    if (!is_(p, TK_RP)) {
         do {
-            Token* pn = expect(p, TK_IDENT);
-            AST* pa = ast_new(N_VAR, pn->line, pn->col); pa->sval = strdup(pn->text); pa->dtype = T_INT;
-            if (check(p, TK_COLON)) { consume(p); AST* ta = parse_type_annot(p); if (ta) pa->dtype = (ta->kind == N_ID ? T_STRUCT : (int)ta->ival); }
-            scope_add(p->local, pn->text, pa->dtype, 0);
-            *ptail = pa; ptail = &pa->next;
-        } while (check(p, TK_COMMA) && (consume(p),1));
+            Tok* pn = expect_tok(p, TK_ID);
+            Node* pa = nd_new(ND_VAR, pn->line, pn->col);
+            pa->name = strdup(pn->text);
+            pa->ty = TY_INT;
+            if (is_(p, TK_COLON)) {
+                consume(p);
+                if (is_typ_kw(p)) pa->ty = typ_kw_to_int(consume(p)->type);
+            }
+            sc_add(p->local, pn->text, pa->ty, 0);
+            *tail = pa; tail = &pa->next;
+        } while (is_(p, TK_COMMA) && (consume(p), 1));
     }
-    expect(p, TK_RP);
-    /* return type annotation */
-    fn->b = NULL;
-    if (check(p, TK_COLON) && !check(p, TK_NL) && !(next(p) && next(p)->type == TK_NL)) {
-        /* this colon is return type, not block start */
-        if (peek(p)->type == TK_COLON) {
-            Token* nx = next(p);
-            if (nx && check_kw_type(p) == 0 && nx->type != TK_NL) { /* actually let me simplify */ }
-        }
+    expect_tok(p, TK_RP);
+
+    if (is_(p, TK_COLON) && nxt_tok(p) && (nxt_tok(p)->type == KW_INT || nxt_tok(p)->type == KW_FLT || nxt_tok(p)->type == KW_STR || nxt_tok(p)->type == KW_BOL || nxt_tok(p)->type == KW_VOID)) {
+        consume(p);
+        fn->ty = typ_kw_to_int(consume(p)->type);
+    } else {
+        fn->ty = TY_INT;
     }
-    if (check(p, TK_COLON)) {
-        Token* col = peek(p);
-        Token* nx = next(p);
-        /* If the colon is followed by a type keyword (not NL/INDENT), it's a return type annotation */
-        if (nx && (nx->type == KW_INT || nx->type == KW_FLT || nx->type == KW_STR || nx->type == KW_BOL || nx->type == KW_VOID)) {
-            consume(p); /* colon */
-            AST* rta = parse_type_annot(p);
-            if (rta) fn->b = rta;
-        }
-    }
-    fn->dtype = fn->b ? (fn->b->kind == N_ID ? T_STRUCT : (int)fn->b->ival) : T_INT;
-    /* register in global scope */
-    scope_add(p->global, nm->text, fn->dtype, 1);
-    /* parse body */
-    fn->c = parse_block(p);
+    sc_add(p->global, nm->text, fn->ty, 1);
+    fn->b = parse_block(p);
     return fn;
 }
 
-static AST* parse_return(Parser* p) {
-    Token* tk = consume(p); AST* n = ast_new(N_RET, tk->line, tk->col);
-    if (!check(p, TK_NL) && !check(p, TK_DEDENT) && !check(p, TK_EOF)) n->a = parse_expr(p);
+static Node* parse_ret(Parser* p) {
+    Tok* tk = consume(p);
+    Node* n = nd_new(ND_RET, tk->line, tk->col);
+    if (!is_(p, TK_NL) && !is_(p, TK_DEDENT) && !is_(p, TK_EOF))
+        n->a = parse_expr(p);
     return n;
 }
 
-static AST* parse_struct(Parser* p) {
-    Token* tk = consume(p); /* typ */
-    Token* nm = expect(p, TK_IDENT);
-    expect(p, TK_COLON);
-    AST* n = ast_new(N_STRUCT, tk->line, tk->col); n->sval = strdup(nm->text);
-    scope_add(p->global, nm->text, T_STRUCT, 0);
-    /* parse fields */
-    expect(p, TK_NL); expect(p, TK_INDENT);
-    AST** tail = &n->a;
-    while (!check(p, TK_DEDENT) && !check(p, TK_EOF)) {
-        Token* fnm = expect(p, TK_IDENT); expect(p, TK_COLON);
-        AST* fld = ast_new(N_VAR, fnm->line, fnm->col); fld->sval = strdup(fnm->text);
-        AST* ta = parse_type_annot(p); fld->b = ta; fld->dtype = ta ? (ta->kind==N_ID?T_STRUCT:(int)ta->ival) : T_INT;
+static Node* parse_class(Parser* p) {
+    Tok* tk = consume(p);
+    Tok* nm = expect_tok(p, TK_ID);
+    Node* cl = nd_new(ND_CLASS, tk->line, tk->col);
+    cl->name = strdup(nm->text);
+    sc_add(p->global, nm->text, TY_CLASS, 0);
+    expect_tok(p, TK_COLON);
+    expect_tok(p, TK_NL);
+    expect_tok(p, TK_INDENT);
+    Node** tail = &cl->a;
+    while (!is_(p, TK_DEDENT) && !is_(p, TK_EOF)) {
+        Tok* fn = expect_tok(p, TK_ID);
+        expect_tok(p, TK_COLON);
+        Node* fld = nd_new(ND_VAR, fn->line, fn->col);
+        fld->name = strdup(fn->text);
+        if (is_typ_kw(p)) fld->ty = typ_kw_to_int(consume(p)->type);
+        else if (is_(p, TK_ID)) { fld->ty = TY_CLASS; fld->b = nd_id(consume(p)->text, 0, 0); }
+        else fld->ty = TY_INT;
         *tail = fld; tail = &fld->next;
-        if (check(p, TK_NL)) consume(p); else if (!check(p, TK_DEDENT)) error_at(fnm->line, fnm->col, "expected newline in struct body");
+        if (is_(p, TK_NL)) consume(p);
+        else if (!is_(p, TK_DEDENT)) dsc_error(fn->line, fn->col, "expected newline in class body");
     }
-    expect(p, TK_DEDENT);
-    return n;
+    expect_tok(p, TK_DEDENT);
+    return cl;
 }
 
-static AST* parse_block(Parser* p) {
-    /* After a ':', we may have a single-line body or an indented block */
-    if (!check(p, TK_COLON)) error_at(peek(p)->line, peek(p)->col, "expected ':' before block");
+static Node* parse_block(Parser* p) {
+    if (!is_(p, TK_COLON)) {
+        Tok* tk = peek(p);
+        dsc_error(tk ? tk->line : 0, tk ? tk->col : 0, "expected ':' before block");
+    }
+    consume(p);
+    Node* blk = nd_new(ND_BLOCK, peek(p) ? peek(p)->line : 0, peek(p) ? peek(p)->col : 0);
+    Node** tail = &blk->a;
 
-    /* Check for single-line block: colon followed by non-NEWLINE (expression on same line) */
-    Token* col = consume(p);
-
-    AST* block = ast_new(N_BLOCK, col->line, col->col);
-
-    if (check(p, TK_NL)) {
-        consume(p); /* newline */
-        expect(p, TK_INDENT);
-        AST** tail = &block->a;
-        while (!check(p, TK_DEDENT) && !check(p, TK_EOF)) {
-            *tail = parse_statement(p);
-            /* move to next after the statement */
-            while (*tail) { tail = &(*tail)->next; (void)0; } /* find end */
-            /* actually we need to link properly */
-            if (!block->a) block->a = *tail;
-            else { AST* cur = block->a; while (cur->next) cur = cur->next; cur->next = *tail; }
-            /* also consume optional trailing newline */
-            if (check(p, TK_NL)) consume(p);
+    if (is_(p, TK_NL)) {
+        consume(p);
+        expect_tok(p, TK_INDENT);
+        while (!is_(p, TK_DEDENT) && !is_(p, TK_EOF)) {
+            Node* st = parse_stmt(p);
+            if (st) { *tail = st; while (*tail && (*tail)->next) tail = &(*tail)->next; if (*tail) tail = &(*tail)->next; }
+            if (is_(p, TK_NL)) consume(p);
         }
-        expect(p, TK_DEDENT);
+        expect_tok(p, TK_DEDENT);
     } else {
-        /* single-line block */
-        block->a = parse_statement(p);
+        blk->a = parse_stmt(p);
     }
-    return block;
+    return blk;
 }
 
-static AST* parse_statement(Parser* p) {
-    Token* tk = peek(p);
+static Node* parse_stmt(Parser* p) {
+    Tok* tk = peek(p);
     if (!tk || tk->type == TK_DEDENT || tk->type == TK_EOF) return NULL;
 
-    if (tk->type == KW_LET) return parse_var_decl(p);
     if (tk->type == KW_IF) return parse_if(p);
-    if (tk->type == KW_WHL) return parse_while(p);
+    if (tk->type == KW_WHILE) return parse_while(p);
     if (tk->type == KW_FOR) return parse_for(p);
-    if (tk->type == KW_FN) return parse_fn_def(p);
-    if (tk->type == KW_RET) return parse_return(p);
-    if (tk->type == KW_TYP) return parse_struct(p);
+    if (tk->type == KW_DEF) return parse_def(p);
+    if (tk->type == KW_RETURN) return parse_ret(p);
+    if (tk->type == KW_CLASS) return parse_class(p);
 
-    /* must be expression statement or assignment */
-    AST* e = parse_expr(p);
-    if (check(p, TK_EQ)) { consume(p); return parse_assignment(p, e); }
-    /* expression statement wraps expression */
-    AST* st = ast_new(N_PRT, tk->line, tk->col); st->dtype = -1; st->a = e;
-    /* If it's already a prt call, return e directly */
-    if (e->kind == N_CALL && e->sval && !strcmp(e->sval, "prt")) { st->a = e; st->kind = N_PRT; st->dtype = e->dtype; return st; }
-    /* wrap as expr stmt */
-    return st;
+    /* Expression or assignment */
+    Node* e = parse_expr(p);
+    if (is_(p, TK_EQ)) { consume(p);
+        /* If it's a bare identifier not yet defined, treat as var declaration */
+        if (e->kind == ND_ID && !sc_find(p->local, e->name) && !sc_find(p->global, e->name)) {
+            Node* rv = parse_expr(p);
+            Node* n = nd_new(ND_VAR, e->line, e->col);
+            n->name = strdup(e->name);
+            n->a = rv;
+            n->ty = rv->ty;
+            sc_add(p->local, n->name, rv->ty, 0);
+            free(e->name); free(e);
+            return n;
+        }
+        return parse_assign(p, e);
+    }
+    return e;
 }
 
-static AST* parse_program(Parser* p) {
-    AST* prog = ast_new(N_PROG, 0, 0);
-    AST** tail = &prog->a;
-    while (p->pos < p->count && p->toks[p->pos]->type != TK_EOF) {
-        AST* st = parse_statement(p);
-        if (st) { *tail = st; tail = &st->next; }
-        if (check(p, TK_NL)) consume(p);
+static Node* parse_program(Parser* p) {
+    Node* prog = nd_new(ND_PROG, 0, 0);
+    Node** tail = &prog->a;
+    while (p->pos < p->count && peek(p)->type != TK_EOF) {
+        Node* st = parse_stmt(p);
+        if (st) { *tail = st; while (*tail) { tail = &(*tail)->next; } }
+        if (is_(p, TK_NL)) consume(p);
     }
     return prog;
 }
 
-static AST* parse(Token** toks, int count) {
+static Node* parse(Tok** toks, int count) {
     Parser p = {toks, 0, count, NULL, NULL};
-    p.global = scope_new(NULL);
+    p.global = sc_new(NULL);
     p.local = p.global;
 
-    /* First pass: collect function names and struct names so mutual recursion works */
+    /* Pass 1: collect function and class names */
     int saved = p.pos;
     while (p.pos < count) {
-        Token* tk = p.toks[p.pos];
-        if (tk->type == KW_FN) {
+        Tok* tk = p.toks[p.pos];
+        if (tk->type == KW_DEF) {
             p.pos++;
-            Token* nm = expect(&p, TK_IDENT);
-            scope_add(p.global, nm->text, T_INT, 1); /* placeholder */
-            /* skip to next top-level statement */
-            int depth = 0;
-            while (p.pos < count) {
-                if (p.toks[p.pos]->type == TK_COLON) { /* skip block */ break; }
+            Tok* nm = expect_tok(&p, TK_ID);
+            sc_add(p.global, nm->text, TY_INT, 1);
+            while (p.pos < count && p.toks[p.pos]->type != TK_COLON) p.pos++;
+            if (p.pos < count) p.pos++;
+            int depth = 1;
+            while (p.pos < count && depth > 0) {
+                if (p.toks[p.pos]->type == TK_INDENT) depth++;
+                else if (p.toks[p.pos]->type == TK_DEDENT) depth--;
                 p.pos++;
             }
-            if (p.pos < count) p.pos++; /* skip colon */
-            /* skip indented block */
-        } else if (tk->type == KW_TYP) {
+        } else if (tk->type == KW_CLASS) {
             p.pos++;
-            Token* nm = expect(&p, TK_IDENT);
-            scope_add(p.global, nm->text, T_STRUCT, 0);
-            while (p.pos < count && p.toks[p.pos]->type != TK_DEDENT && p.toks[p.pos]->type != TK_EOF) p.pos++;
+            Tok* nm = expect_tok(&p, TK_ID);
+            sc_add(p.global, nm->text, TY_CLASS, 0);
+            while (p.pos < count && p.toks[p.pos]->type != TK_DEDENT) p.pos++;
         } else {
             p.pos++;
         }
     }
     p.pos = saved;
-    p.local = scope_new(p.global);
+    p.local = sc_new(p.global);
 
-    AST* prog = parse_program(&p);
-    free(p.local->syms); free(p.local);
+    Node* prog = parse_program(&p);
+    sc_free(p.local);
     return prog;
 }
 
 /* ================================================================
- *  C Code generator
+ *  Section 6: Bytecode Compiler
  * ================================================================ */
-static void gen_expr(DStr* out, AST* n);
-static void gen_stmt(DStr* out, AST* n, int indent);
 
-static void gen_indent(DStr* out, int n) { for (int i = 0; i < n; i++) dstr_add(out, "    "); }
+/* --- Opcodes --- */
+enum {
+    OP_HALT = 0,
+    OP_PUSH_INT, OP_PUSH_FLT, OP_PUSH_STR, OP_PUSH_BOL,
+    OP_LOAD, OP_STORE,
+    OP_LOAD_GBL, OP_STORE_GBL,
+    OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
+    OP_EQ, OP_NEQ, OP_LT, OP_GT, OP_LTE, OP_GTE,
+    OP_AND, OP_OR, OP_NOT, OP_NEG,
+    OP_JMP, OP_JMP_IF_FALSE, OP_JMP_IF_TRUE,
+    OP_POP, OP_DUP,
+    OP_CALL, OP_RET,
+    OP_ARRAY, OP_ARR_GET, OP_ARR_SET, OP_ARR_LEN,
+    OP_FIELD_GET, OP_FIELD_SET, OP_MAKE_OBJ,
+    OP_PRINT, OP_INPUT,
+    OP_TYPE,
+};
 
-static const char* op_to_c(int op) {
-    switch (op) { case TK_PLUS: return "+"; case TK_MINUS: return "-"; case TK_STAR: return "*"; case TK_SLASH: return "/";
-    case TK_PCT: return "%"; case TK_EQEQ: return "=="; case TK_NEQ: return "!="; case TK_LT: return "<"; case TK_GT: return ">";
-    case TK_LTE: return "<="; case TK_GTE: return ">="; case TK_AMP: return "&&"; case TK_PIPE: return "||"; default: return "?"; }
+/* --- Instruction --- */
+typedef struct { uint8_t op; int64_t arg; } Instr;
+
+/* --- Code buffer --- */
+typedef struct { Instr* code; int count, cap; } Code;
+
+static void code_init(Code* c) { c->cap = 256; c->code = malloc(sizeof(Instr) * c->cap); c->count = 0; }
+
+static int emit(Code* c, uint8_t op, int64_t arg) {
+    if (c->count >= c->cap) { c->cap *= 2; c->code = realloc(c->code, sizeof(Instr) * c->cap); }
+    c->code[c->count].op = op; c->code[c->count].arg = arg;
+    return c->count++;
 }
 
-static void gen_expr(DStr* out, AST* n) {
-    if (!n) { dstr_add(out, "0"); return; }
+static int emit0(Code* c, uint8_t op) { return emit(c, op, 0); }
+
+static void patch(Code* c, int addr, int64_t arg) { c->code[addr].arg = arg; }
+
+static void code_free(Code* c) { free(c->code); }
+
+/* --- Constant pool --- */
+typedef struct { char** strs; int count, cap; } CP;
+
+static void cp_init(CP* p) { p->cap = 64; p->strs = malloc(sizeof(char*) * p->cap); p->count = 0; }
+
+static int cp_str(CP* p, const char* s) {
+    if (p->count >= p->cap) { p->cap *= 2; p->strs = realloc(p->strs, sizeof(char*) * p->cap); }
+    p->strs[p->count] = strdup(s);
+    return p->count++;
+}
+
+static void cp_free(CP* p) { for (int i = 0; i < p->count; i++) free(p->strs[i]); free(p->strs); }
+
+/* --- Function info --- */
+typedef struct { char* name; Code code; int params; } Func;
+typedef struct { Func* f; int count, cap; } FT;
+
+static void ft_init(FT* t) { t->cap = 16; t->f = calloc(t->cap, sizeof(Func)); t->count = 0; }
+
+static int ft_add(FT* t, const char* name, int params) {
+    if (t->count >= t->cap) { t->cap *= 2; t->f = realloc(t->f, sizeof(Func) * t->cap); }
+    Func* fn = &t->f[t->count];
+    fn->name = strdup(name); code_init(&fn->code); fn->params = params;
+    return t->count++;
+}
+
+static void ft_free(FT* t) { for (int i = 0; i < t->count; i++) { free(t->f[i].name); code_free(&t->f[i].code); } free(t->f); }
+
+/* --- Struct info --- */
+typedef struct { char* name; char** fields; int* ftypes; int nf; } StructDef;
+typedef struct { StructDef* d; int count, cap; } ST;
+
+static void st_init(ST* t) { t->cap = 8; t->d = calloc(t->cap, sizeof(StructDef)); t->count = 0; }
+
+static int st_add(ST* t, const char* name) {
+    if (t->count >= t->cap) { t->cap *= 2; t->d = realloc(t->d, sizeof(StructDef) * t->cap); }
+    StructDef* s = &t->d[t->count];
+    s->name = strdup(name); s->fields = NULL; s->ftypes = NULL; s->nf = 0;
+    return t->count++;
+}
+
+static void st_free(ST* t) { for (int i = 0; i < t->count; i++) { free(t->d[i].name); free(t->d[i].fields); free(t->d[i].ftypes); } free(t->d); }
+
+/* --- Compiler context --- */
+typedef struct {
+    Code* out;
+    CP* cp;
+    FT* ft;
+    ST* st;
+} Comp;
+
+/* --- Compile-time variable tracking --- */
+typedef struct VarEntry { char* name; int slot; struct VarEntry* next; } VarEntry;
+
+static int next_slot(VarEntry* vars) {
+    int max = 0;
+    for (VarEntry* v = vars; v; v = v->next) if (v->slot >= max) max = v->slot + 1;
+    return max;
+}
+
+static void add_var(VarEntry** vars, const char* name, VarEntry* entry) {
+    entry->name = strdup(name);
+    entry->slot = next_slot(*vars);
+    entry->next = *vars;
+    *vars = entry;
+}
+
+static int find_slot(VarEntry* vars, const char* name) {
+    for (VarEntry* v = vars; v; v = v->next)
+        if (!strcmp(v->name, name)) return v->slot;
+    return -1;
+}
+
+static void free_vars(VarEntry* vars) {
+    while (vars) { VarEntry* n = vars->next; free(vars->name); free(vars); vars = n; }
+}
+
+/* --- Forward declarations --- */
+static void comp_expr(Comp* c, Node* n, VarEntry* vars);
+static void comp_stmt(Comp* c, Node* n, VarEntry** vars);
+static void comp_block(Comp* c, Node* blk, VarEntry** vars);
+
+/* --- Expression compiler --- */
+static void comp_expr(Comp* c, Node* n, VarEntry* vars) {
+    if (!n) { emit0(c->out, OP_PUSH_INT); return; }
+
     switch (n->kind) {
-        case N_INT: dstr_addi(out, n->ival); break;
-        case N_FLT: dstr_addd(out, n->fval); break;
-        case N_STR: dstr_addc(out, '"'); dstr_add(out, n->sval); dstr_addc(out, '"'); break;
-        case N_BOOL: dstr_add(out, n->ival ? "1" : "0"); break;
-        case N_ID: dstr_add(out, n->sval); break;
-        case N_BINOP:
-            dstr_addc(out, '('); gen_expr(out, n->a);
-            dstr_addc(out, ' '); dstr_add(out, op_to_c((int)n->ival)); dstr_addc(out, ' ');
-            gen_expr(out, n->b); dstr_addc(out, ')'); break;
-        case N_UNOP:
-            if (n->ival == TK_BANG) { dstr_add(out, "!("); gen_expr(out, n->a); dstr_addc(out, ')'); }
-            else { dstr_add(out, "-("); gen_expr(out, n->a); dstr_addc(out, ')'); }
+        case ND_INT:
+            emit(c->out, OP_PUSH_INT, n->ival);
             break;
-        case N_CALL:
-            dstr_add(out, n->sval); dstr_addc(out, '(');
-            { AST* a = n->a; int first = 1; while (a) { if (!first) dstr_add(out, ", "); gen_expr(out, a); a = a->next; first = 0; } }
-            dstr_addc(out, ')'); break;
-        case N_IDX: gen_expr(out, n->a); dstr_addc(out, '['); gen_expr(out, n->b); dstr_addc(out, ']'); break;
-        case N_FLD: gen_expr(out, n->a); dstr_addc(out, '.'); dstr_add(out, n->sval); break;
-        case N_ARR_LEN:
-            dstr_add(out, "(sizeof("); dstr_add(out, n->sval); dstr_add(out, ") / sizeof("); dstr_add(out, n->sval); dstr_add(out, "[0]))"); break;
-        case N_INP:
-            if (n->a) { dstr_add(out, "dsc_inp_int("); gen_expr(out, n->a); dstr_addc(out, ')'); }
-            else dstr_add(out, "dsc_inp_int(NULL)"); break;
-        case N_STRUCT_LIT:
-            dstr_add(out, "("); dstr_add(out, n->sval); dstr_add(out, "){");
-            { AST* f = n->a; int first = 1; while (f) { if (!first) dstr_add(out, ", "); gen_expr(out, f->a); f = f->next; first = 0; } }
-            dstr_addc(out, '}'); break;
-        case N_ARR:
-            dstr_addc(out, '{');
-            { AST* e = n->a; int first = 1; while (e) { if (!first) dstr_add(out, ", "); gen_expr(out, e); e = e->next; first = 0; } }
-            dstr_addc(out, '}'); break;
-        default: dstr_add(out, "/*expr*/"); break;
-    }
-}
 
-static void gen_prt(DStr* out, AST* n, int indent) {
-    AST* arg = n->kind == N_PRT ? n->a : n;
-    /* If arg is N_CALL with name prt, unwrap */
-    if (arg && arg->kind == N_CALL && arg->sval && !strcmp(arg->sval, "prt")) {
-        arg = arg->a; /* first argument */
-    }
-    if (!arg) return;
-    gen_indent(out, indent);
-    switch (arg->dtype) {
-        case T_INT: dstr_add(out, "dsc_prt_int("); gen_expr(out, arg); dstr_add(out, ");\n"); break;
-        case T_FLT: dstr_add(out, "dsc_prt_flt("); gen_expr(out, arg); dstr_add(out, ");\n"); break;
-        case T_STR: dstr_add(out, "dsc_prt_str("); gen_expr(out, arg); dstr_add(out, ");\n"); break;
-        case T_BOL: dstr_add(out, "dsc_prt_bol("); gen_expr(out, arg); dstr_add(out, ");\n"); break;
-        default: dstr_add(out, "dsc_prt_int("); gen_expr(out, arg); dstr_add(out, ");\n"); break;
-    }
-}
+        case ND_FLT: {
+            int64_t raw; memcpy(&raw, &n->fval, sizeof(double));
+            emit(c->out, OP_PUSH_FLT, raw);
+            break; }
 
-static void gen_stmt(DStr* out, AST* n, int indent) {
-    if (!n) return;
-    switch (n->kind) {
-        case N_VAR:
-            gen_indent(out, indent);
-            if (n->b && n->b->kind == N_ID) dstr_add(out, n->b->sval);
-            else if (n->b) dstr_add(out, dtype_to_cstr((int)n->b->ival));
-            else if (n->dtype == T_STRUCT && n->a && n->a->kind == N_STRUCT_LIT) dstr_add(out, n->a->sval);
-            else if (n->dtype == T_STR) dstr_add(out, "const char*");
-            else dstr_add(out, dtype_to_cstr(n->dtype));
-            dstr_addc(out, ' '); dstr_add(out, n->sval);
-            if (n->a && n->a->kind == N_ARR) dstr_add(out, "[]");
-            dstr_add(out, " = "); gen_expr(out, n->a); dstr_add(out, ";\n"); break;
-        case N_ASSIGN:
-            gen_indent(out, indent); gen_expr(out, n->a); dstr_add(out, " = "); gen_expr(out, n->b); dstr_add(out, ";\n"); break;
-        case N_IF:
-            gen_indent(out, indent); dstr_add(out, "if ("); gen_expr(out, n->a); dstr_add(out, ") {\n");
-            if (n->b) { for (AST* s = (n->b->kind == N_BLOCK ? n->b->a : n->b); s; s = s->next) gen_stmt(out, s, indent+1); }
-            gen_indent(out, indent); dstr_add(out, "}");
-            if (n->c) {
-                if (n->c->kind == N_IF) { dstr_add(out, " else "); gen_stmt(out, n->c, indent); }
-                else { dstr_add(out, " else {\n"); for (AST* s = (n->c->kind == N_BLOCK ? n->c->a : n->c); s; s = s->next) gen_stmt(out, s, indent+1);
-                    gen_indent(out, indent); dstr_add(out, "}"); }
-            }
-            dstr_add(out, "\n"); break;
-        case N_WHL:
-            gen_indent(out, indent); dstr_add(out, "while ("); gen_expr(out, n->a); dstr_add(out, ") {\n");
-            if (n->b) { for (AST* s = (n->b->kind == N_BLOCK ? n->b->a : n->b); s; s = s->next) gen_stmt(out, s, indent+1); }
-            gen_indent(out, indent); dstr_add(out, "}\n"); break;
-        case N_FOR:
-            gen_indent(out, indent); dstr_add(out, "for (");
-            /* init */
-            if (n->a) {
-                AST* init = n->a;
-                if (init->kind == N_VAR) {
-                    if (init->b) dstr_add(out, dtype_to_cstr((int)init->b->ival)); else dstr_add(out, dtype_to_cstr(init->dtype));
-                    dstr_addc(out, ' '); dstr_add(out, init->sval); dstr_add(out, " = "); gen_expr(out, init->a);
-                } else if (init->kind == N_ASSIGN) {
-                    gen_expr(out, init->a); dstr_add(out, " = "); gen_expr(out, init->b);
+        case ND_STR: {
+            int idx = cp_str(c->cp, n->name);
+            emit(c->out, OP_PUSH_STR, idx);
+            break; }
+
+        case ND_BOOL:
+            emit(c->out, OP_PUSH_BOL, n->ival ? 1 : 0);
+            break;
+
+        case ND_ID: {
+            int slot = find_slot(vars, n->name);
+            if (slot >= 0) emit(c->out, OP_LOAD, slot);
+            else { int idx = cp_str(c->cp, n->name); emit(c->out, OP_LOAD_GBL, idx); }
+            break; }
+
+        case ND_BINOP: {
+            if (n->ival == KW_AND) {
+                comp_expr(c, n->a, vars);
+                emit0(c->out, OP_DUP);
+                int jmp = emit(c->out, OP_JMP_IF_FALSE, -1);
+                emit0(c->out, OP_POP);
+                comp_expr(c, n->b, vars);
+                patch(c->out, jmp, c->out->count);
+            } else if (n->ival == KW_OR) {
+                comp_expr(c, n->a, vars);
+                emit0(c->out, OP_DUP);
+                int jmp = emit(c->out, OP_JMP_IF_TRUE, -1);
+                emit0(c->out, OP_POP);
+                comp_expr(c, n->b, vars);
+                patch(c->out, jmp, c->out->count);
+            } else {
+                comp_expr(c, n->a, vars);
+                comp_expr(c, n->b, vars);
+                switch (n->ival) {
+                    case TK_PLUS: emit0(c->out, OP_ADD); break;
+                    case TK_MINUS: emit0(c->out, OP_SUB); break;
+                    case TK_STAR: emit0(c->out, OP_MUL); break;
+                    case TK_SLASH: emit0(c->out, OP_DIV); break;
+                    case TK_PCT: emit0(c->out, OP_MOD); break;
+                    case TK_EQEQ: emit0(c->out, OP_EQ); break;
+                    case TK_NEQ: emit0(c->out, OP_NEQ); break;
+                    case TK_LT: emit0(c->out, OP_LT); break;
+                    case TK_GT: emit0(c->out, OP_GT); break;
+                    case TK_LTE: emit0(c->out, OP_LTE); break;
+                    case TK_GTE: emit0(c->out, OP_GTE); break;
                 }
             }
-            dstr_add(out, "; "); gen_expr(out, n->b); /* condition */
-            dstr_add(out, "; ");
-            if (n->c) { AST* upd = n->c; gen_expr(out, upd->a); dstr_add(out, " = "); gen_expr(out, upd->b); }
-            dstr_add(out, ") {\n");
-            if (n->d) { for (AST* s = (n->d->kind == N_BLOCK ? n->d->a : n->d); s; s = s->next) gen_stmt(out, s, indent+1); }
-            gen_indent(out, indent); dstr_add(out, "}\n"); break;
-        case N_RET:
-            gen_indent(out, indent); if (n->a) { dstr_add(out, "return "); gen_expr(out, n->a); dstr_add(out, ";\n"); } else dstr_add(out, "return 0;\n"); break;
-        case N_PRT: gen_prt(out, n, indent); break;
-        case N_STRUCT:
-            gen_indent(out, indent); dstr_add(out, "typedef struct {\n");
-            for (AST* f = n->a; f; f = f->next) {
-                gen_indent(out, indent+1);
-                if (f->dtype == T_STRUCT && f->b && f->b->kind == N_ID) dstr_add(out, f->b->sval);
-                else dstr_add(out, dtype_to_cstr(f->dtype));
-                dstr_addc(out, ' '); dstr_add(out, f->sval); dstr_add(out, ";\n");
+            break; }
+
+        case ND_UNOP:
+            comp_expr(c, n->a, vars);
+            if (n->ival == KW_NOT) emit0(c->out, OP_NOT);
+            else emit0(c->out, OP_NEG);
+            break;
+
+        case ND_CALL: {
+            if (!strcmp(n->name, "print")) {
+                comp_expr(c, n->a, vars);
+                emit0(c->out, OP_PRINT);
+            } else if (!strcmp(n->name, "input")) {
+                if (n->a) comp_expr(c, n->a, vars);
+                else emit(c->out, OP_PUSH_STR, -1);
+                emit0(c->out, OP_INPUT);
+            } else if (!strcmp(n->name, "len")) {
+                comp_expr(c, n->a, vars);
+                emit0(c->out, OP_ARR_LEN);
+            } else if (!strcmp(n->name, "type")) {
+                comp_expr(c, n->a, vars);
+                emit0(c->out, OP_TYPE);
+            } else {
+                int argc = 0; Node* arg = n->a;
+                while (arg) { comp_expr(c, arg, vars); arg = arg->next; argc++; }
+                int fi = -1;
+                for (int i = 0; i < c->ft->count; i++)
+                    if (!strcmp(c->ft->f[i].name, n->name)) { fi = i; break; }
+                emit(c->out, OP_CALL, fi | (argc << 16));
             }
-            gen_indent(out, indent); dstr_add(out, "} "); dstr_add(out, n->sval); dstr_add(out, ";\n"); break;
+            break; }
+
+        case ND_IDX:
+            comp_expr(c, n->a, vars);
+            comp_expr(c, n->b, vars);
+            emit0(c->out, OP_ARR_GET);
+            break;
+
+        case ND_FLD: {
+            comp_expr(c, n->a, vars);
+            int fi = 0;
+            for (int s = 0; s < c->st->count; s++) {
+                for (int f = 0; f < c->st->d[s].nf; f++) {
+                    if (!strcmp(c->st->d[s].fields[f], n->name)) { fi = f; goto found_fi; }
+                }
+            }
+            found_fi:
+            emit(c->out, OP_FIELD_GET, fi);
+            break; }
+
+        case ND_ARR: {
+            int ne = 0; Node* e = n->a;
+            while (e) { comp_expr(c, e, vars); e = e->next; ne++; }
+            emit(c->out, OP_ARRAY, ne);
+            break; }
+
+        case ND_CLASS_LIT: {
+            int nf = 0; Node* f = n->a;
+            while (f) { comp_expr(c, f->a, vars); f = f->next; nf++; }
+            int si = -1;
+            for (int i = 0; i < c->st->count; i++)
+                if (!strcmp(c->st->d[i].name, n->name)) { si = i; break; }
+            emit(c->out, OP_MAKE_OBJ, si | (nf << 16));
+            break; }
+
         default:
-            /* expression statement (unwrapped) */
-            if (n->kind == N_CALL) { gen_indent(out, indent); gen_expr(out, n); dstr_add(out, ";\n"); }
-            else { gen_indent(out, indent); dstr_add(out, "/* expr */ "); gen_expr(out, n); dstr_add(out, ";\n"); }
+            emit0(c->out, OP_PUSH_INT);
             break;
     }
 }
 
-static void gen_fn(DStr* out, AST* n) {
-    /* signature: ret_type name(params) */
-    if (n->b && n->b->kind == N_ID) dstr_add(out, n->b->sval);
-    else if (n->b) dstr_add(out, dtype_to_cstr((int)n->b->ival));
-    else if (n->dtype == T_STRUCT) dstr_add(out, "int64_t"); /* fallback */
-    else dstr_add(out, dtype_to_cstr(n->dtype));
-    dstr_addc(out, ' '); dstr_add(out, n->sval); dstr_addc(out, '(');
-    AST* pa = n->a; int first = 1;
-    while (pa) { if (!first) dstr_add(out, ", "); dstr_add(out, dtype_to_cstr(pa->dtype)); dstr_addc(out, ' '); dstr_add(out, pa->sval); pa = pa->next; first = 0; }
-    dstr_add(out, ") {\n");
-    if (n->c) {
-        AST* body = n->c->kind == N_BLOCK ? n->c->a : n->c;
-        for (AST* s = body; s; s = s->next) gen_stmt(out, s, 1);
+static void comp_assign(Comp* c, Node* lv, Node* rv, VarEntry** vars) {
+    if (lv->kind == ND_IDX) {
+        comp_expr(c, lv->a, *vars);
+        comp_expr(c, lv->b, *vars);
+        comp_expr(c, rv, *vars);
+        emit0(c->out, OP_ARR_SET);
+    } else if (lv->kind == ND_FLD) {
+        comp_expr(c, lv->a, *vars);
+        comp_expr(c, rv, *vars);
+        int fi = 0;
+        for (int s = 0; s < c->st->count; s++) {
+            for (int f = 0; f < c->st->d[s].nf; f++) {
+                if (!strcmp(c->st->d[s].fields[f], lv->name)) { fi = f; goto found_fs; }
+            }
+        }
+        found_fs:
+        emit(c->out, OP_FIELD_SET, fi);
+    } else {
+        comp_expr(c, rv, *vars);
+        int slot = find_slot(*vars, lv->name);
+        if (slot >= 0) emit(c->out, OP_STORE, slot);
+        else { int idx = cp_str(c->cp, lv->name); emit(c->out, OP_STORE_GBL, idx); }
     }
-    dstr_add(out, "    return 0;\n}\n\n");
 }
 
-static char* generate_c(AST* prog, const char* src_name) {
-    DStr* out = dstr_new();
-    dstr_add(out, "/* Generated by DSCBT compiler from "); dstr_add(out, src_name); dstr_add(out, " */\n");
-    dstr_add(out, "#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\n\n");
+static void comp_stmt(Comp* c, Node* n, VarEntry** vars) {
+    if (!n) return;
 
-    /* Helper functions */
-    dstr_add(out, "static void dsc_prt_int(int64_t v) { printf(\"%lld\\n\", (long long)v); }\n");
-    dstr_add(out, "static void dsc_prt_flt(double v) { printf(\"%f\\n\", v); }\n");
-    dstr_add(out, "static void dsc_prt_str(const char* v) { printf(\"%s\\n\", v); }\n");
-    dstr_add(out, "static void dsc_prt_bol(int v) { printf(\"%s\\n\", v ? \"tru\" : \"fal\"); }\n");
-    dstr_add(out, "static int64_t dsc_inp_int(const char* p) { if(p) printf(\"%s\",p); int64_t v; scanf(\"%lld\",(long long*)&v); return v; }\n");
-    dstr_add(out, "static char* dsc_str_cat(const char* a, const char* b) { char* r=malloc(strlen(a)+strlen(b)+1); strcpy(r,a); strcat(r,b); return r; }\n\n");
+    switch (n->kind) {
+        case ND_VAR: {
+            comp_expr(c, n->a, *vars);
+            VarEntry* ve = malloc(sizeof(VarEntry));
+            ve->next = NULL;
+            add_var(vars, n->name, ve);
+            emit(c->out, OP_STORE, ve->slot);
+            break; }
 
-    /* Forward declarations */
-    int has_fwd = 0;
-    for (AST* s = prog->a; s; s = s->next) {
-        if (s->kind == N_FN) { dstr_add(out, dtype_to_cstr(s->dtype)); dstr_addc(out, ' '); dstr_add(out, s->sval); dstr_addc(out, '(');
-            AST* pa = s->a; int f = 1;
-            while (pa) { if (!f) dstr_add(out, ", "); dstr_add(out, dtype_to_cstr(pa->dtype)); dstr_addc(out, ' '); dstr_add(out, pa->sval); pa = pa->next; f = 0; }
-            dstr_add(out, ");\n"); has_fwd = 1; }
+        case ND_ASSIGN:
+            comp_assign(c, n->a, n->b, vars);
+            break;
+
+        case ND_IF: {
+            comp_expr(c, n->a, *vars);
+            int j1 = emit(c->out, OP_JMP_IF_FALSE, -1);
+            comp_block(c, n->b, vars);
+            if (n->c) {
+                int j2 = emit(c->out, OP_JMP, -1);
+                patch(c->out, j1, c->out->count);
+                if (n->c->kind == ND_IF) comp_stmt(c, n->c, vars);
+                else comp_block(c, n->c, vars);
+                patch(c->out, j2, c->out->count);
+            } else {
+                patch(c->out, j1, c->out->count);
+            }
+            break; }
+
+        case ND_WHILE: {
+            int loop = c->out->count;
+            comp_expr(c, n->a, *vars);
+            int j1 = emit(c->out, OP_JMP_IF_FALSE, -1);
+            comp_block(c, n->b, vars);
+            emit(c->out, OP_JMP, loop);
+            patch(c->out, j1, c->out->count);
+            break; }
+
+        case ND_FOR: {
+            /* for x in range(n): body -> desugar to counter loop */
+            VarEntry* ve = malloc(sizeof(VarEntry)); ve->next = NULL;
+            add_var(vars, n->name, ve);
+            int var_slot = ve->slot;
+
+            /* Compile limit expression */
+            comp_expr(c, n->a, *vars);
+            VarEntry* lim = malloc(sizeof(VarEntry)); lim->next = NULL;
+            add_var(vars, "__limit__", lim);
+            emit(c->out, OP_STORE, lim->slot);
+
+            emit0(c->out, OP_PUSH_INT);
+            emit(c->out, OP_STORE, var_slot);
+
+            int loop = c->out->count;
+            /* condition: var < limit */
+            emit(c->out, OP_LOAD, var_slot);
+            emit(c->out, OP_LOAD, lim->slot);
+            emit0(c->out, OP_LT);
+            int j1 = emit(c->out, OP_JMP_IF_FALSE, -1);
+
+            comp_block(c, n->b, vars);
+
+            /* increment: var = var + 1 */
+            emit(c->out, OP_LOAD, var_slot);
+            emit(c->out, OP_PUSH_INT, 1);
+            emit0(c->out, OP_ADD);
+            emit(c->out, OP_STORE, var_slot);
+
+            emit(c->out, OP_JMP, loop);
+            patch(c->out, j1, c->out->count);
+            break; }
+
+        case ND_RET:
+            if (n->a) comp_expr(c, n->a, *vars);
+            else emit0(c->out, OP_PUSH_INT);
+            emit0(c->out, OP_RET);
+            break;
+
+        case ND_PRINT:
+            if (n->a && n->a->kind == ND_CALL && n->a->name && !strcmp(n->a->name, "print")) {
+                comp_expr(c, n->a->a, *vars);
+            } else {
+                comp_expr(c, n->a, *vars);
+            }
+            emit0(c->out, OP_PRINT);
+            break;
+
+        case ND_FN: {
+            int fi = ft_add(c->ft, n->name, 0);
+            int pc = 0; Node* pa = n->a; while (pa) { pc++; pa = pa->next; }
+            c->ft->f[fi].params = pc;
+
+            Code* saved = c->out;
+            c->out = &c->ft->f[fi].code;
+
+            VarEntry* fvars = NULL;
+            pa = n->a; int slot = 0;
+            while (pa) {
+                VarEntry* ve = malloc(sizeof(VarEntry));
+                ve->name = strdup(pa->name);
+                ve->slot = slot;
+                ve->next = fvars;
+                fvars = ve;
+                slot++;
+                pa = pa->next;
+            }
+
+            if (n->b) comp_block(c, n->b, &fvars);
+            emit0(c->out, OP_PUSH_INT);
+            emit0(c->out, OP_RET);
+            free_vars(fvars);
+
+            c->out = saved;
+            break; }
+
+        case ND_CLASS: {
+            int si = st_add(c->st, n->name);
+            int nf = 0; Node* f = n->a; while (f) { nf++; f = f->next; }
+            c->st->d[si].nf = nf;
+            c->st->d[si].fields = malloc(sizeof(char*) * nf);
+            c->st->d[si].ftypes = malloc(sizeof(int) * nf);
+            f = n->a; int i = 0;
+            while (f) {
+                c->st->d[si].fields[i] = strdup(f->name);
+                c->st->d[si].ftypes[i] = f->ty;
+                i++; f = f->next;
+            }
+            break; }
+
+        default:
+            /* Expression statement (e.g., bare function call) */
+            comp_expr(c, n, *vars);
+            break;
     }
-    if (has_fwd) dstr_add(out, "\n");
+}
 
-    /* Struct definitions */
-    for (AST* s = prog->a; s; s = s->next) if (s->kind == N_STRUCT) gen_stmt(out, s, 0);
-    if (has_fwd) dstr_add(out, "\n");
-
-    /* Function implementations */
-    for (AST* s = prog->a; s; s = s->next) if (s->kind == N_FN) gen_fn(out, s);
-
-    /* Main function */
-    dstr_add(out, "int main(int argc, char** argv) {\n    (void)argc; (void)argv;\n");
-    for (AST* s = prog->a; s; s = s->next) { if (s->kind != N_FN && s->kind != N_STRUCT) gen_stmt(out, s, 1); }
-    dstr_add(out, "    return 0;\n}\n");
-
-    char* result = strdup(out->data); dstr_free(out); return result;
+static void comp_block(Comp* c, Node* blk, VarEntry** vars) {
+    if (!blk) return;
+    Node* body = (blk->kind == ND_BLOCK) ? blk->a : blk;
+    for (Node* s = body; s; s = s->next)
+        comp_stmt(c, s, vars);
 }
 
 /* ================================================================
- *  Compiler driver
+ *  Section 7: VM Runtime
  * ================================================================ */
+
+/* Value representation */
+enum { VT_NIL, VT_INT, VT_FLT, VT_STR, VT_BOL, VT_ARR, VT_OBJ };
+
+typedef struct { int type; int64_t i; double f; const char* s; int b; void* p; } Val;
+
+static Val val_nil(void) { Val v = {0}; v.type = VT_NIL; return v; }
+static Val val_int(int64_t i) { Val v = {0}; v.type = VT_INT; v.i = i; return v; }
+static Val val_flt(double f) { Val v = {0}; v.type = VT_FLT; v.f = f; return v; }
+static Val val_str(const char* s) { Val v = {0}; v.type = VT_STR; v.s = s; return v; }
+static Val val_bol(int b) { Val v = {0}; v.type = VT_BOL; v.b = b ? 1 : 0; return v; }
+static Val val_arr(void* p) { Val v = {0}; v.type = VT_ARR; v.p = p; return v; }
+static Val val_obj(void* p) { Val v = {0}; v.type = VT_OBJ; v.p = p; return v; }
+
+static int val_to_bol(Val v) {
+    switch (v.type) {
+        case VT_INT: return v.i != 0;
+        case VT_FLT: return v.f != 0.0;
+        case VT_STR: return v.s && v.s[0];
+        case VT_BOL: return v.b;
+        case VT_ARR: return (v.p != NULL);
+        case VT_OBJ: return 1;
+        default: return 0;
+    }
+}
+
+static const char* val_typename(Val v) {
+    switch (v.type) {
+        case VT_INT: return "int"; case VT_FLT: return "float";
+        case VT_STR: return "str"; case VT_BOL: return "bool";
+        case VT_ARR: return "array"; case VT_OBJ: return "object";
+        default: return "nil";
+    }
+}
+
+/* Array and Object storage */
+typedef struct { int64_t* data; int len, cap; } VArr;
+
+/* Object field storage with type tag */
+typedef struct { int64_t val; int type; } Fld;
+
+/* Heap tracking */
+static void** g_heap_objs = NULL;
+static int g_heap_count = 0;
+static int g_heap_cap = 0;
+
+static void* heap_track(void* p) {
+    if (!p) return p;
+    if (g_heap_count >= g_heap_cap) {
+        g_heap_cap = g_heap_cap ? g_heap_cap * 2 : 64;
+        g_heap_objs = realloc(g_heap_objs, sizeof(void*) * g_heap_cap);
+    }
+    g_heap_objs[g_heap_count++] = p;
+    return p;
+}
+
+static void heap_cleanup(void) {
+    for (int i = 0; i < g_heap_count; i++) free(g_heap_objs[i]);
+    free(g_heap_objs);
+    g_heap_objs = NULL; g_heap_count = 0; g_heap_cap = 0;
+}
+
+/* Global variable storage */
+typedef struct { char* name; Val val; } GlobalVar;
+
+static int g_gvar_count = 0;
+static GlobalVar* g_gvars = NULL;
+
+static Val gvar_get(const char* name) {
+    for (int i = 0; i < g_gvar_count; i++)
+        if (!strcmp(g_gvars[i].name, name)) return g_gvars[i].val;
+    return val_nil();
+}
+
+static void gvar_set(const char* name, Val v) {
+    for (int i = 0; i < g_gvar_count; i++)
+        if (!strcmp(g_gvars[i].name, name)) { g_gvars[i].val = v; return; }
+    if (g_gvar_count >= 256) return;
+    if (!g_gvars) g_gvars = malloc(sizeof(GlobalVar) * 256);
+    g_gvars[g_gvar_count].name = strdup(name);
+    g_gvars[g_gvar_count].val = v;
+    g_gvar_count++;
+}
+
+static void gvar_cleanup(void) {
+    for (int i = 0; i < g_gvar_count; i++) free(g_gvars[i].name);
+    free(g_gvars);
+    g_gvars = NULL; g_gvar_count = 0;
+}
+
+/* --- VM Execution --- */
+static int vm_exec(Instr* code, int code_len, CP* cp, FT* ft, ST* st) {
+    (void)st;  /* struct table used only at compile time */
+    Val* stack = malloc(sizeof(Val) * 8192);
+    int sp = 0;
+    Val* locals = malloc(sizeof(Val) * 512);
+    int local_count = 0;
+    Instr* ip = code;
+    Instr* code_end = code + code_len;
+    Instr* cur_code = code;  /* base of currently executing code segment */
+
+    typedef struct { Instr* ip; Instr* end; int local_count; int sp; Val* locals_buf; Instr* cur_code; } CallFrame;
+    CallFrame cframes[64];
+    int cf_count = 0;
+
+    while (ip < code_end) {
+        Instr* inst = ip++;
+        switch (inst->op) {
+            case OP_HALT: return 0;
+
+            case OP_PUSH_INT: stack[sp++] = val_int(inst->arg); break;
+            case OP_PUSH_FLT: { double d; memcpy(&d, &inst->arg, 8); stack[sp++] = val_flt(d); break; }
+            case OP_PUSH_STR: stack[sp++] = (inst->arg < 0) ? val_str(NULL) : val_str(cp->strs[inst->arg]); break;
+            case OP_PUSH_BOL: stack[sp++] = val_bol(inst->arg ? 1 : 0); break;
+
+            case OP_LOAD: stack[sp++] = locals[(int)inst->arg]; break;
+            case OP_STORE: locals[(int)inst->arg] = stack[--sp]; if ((int)inst->arg + 1 > local_count) local_count = (int)inst->arg + 1; break;
+            case OP_LOAD_GBL: stack[sp++] = gvar_get(cp->strs[inst->arg]); break;
+            case OP_STORE_GBL: gvar_set(cp->strs[inst->arg], stack[--sp]); break;
+
+            case OP_ADD: {
+                Val b = stack[--sp], a = stack[--sp];
+                if (a.type == VT_STR || b.type == VT_STR) {
+                    SBuf* sb = sb_new();
+                    if (a.type == VT_STR) sb_push(sb, a.s); else {
+                        switch (a.type) { case VT_INT: sb_int(sb, a.i); break; case VT_FLT: sb_flt(sb, a.f); break;
+                            case VT_BOL: sb_push(sb, a.b ? "True" : "False"); break; default: sb_push(sb, "nil"); break; }
+                    }
+                    if (b.type == VT_STR) sb_push(sb, b.s); else {
+                        switch (b.type) { case VT_INT: sb_int(sb, b.i); break; case VT_FLT: sb_flt(sb, b.f); break;
+                            case VT_BOL: sb_push(sb, b.b ? "True" : "False"); break; default: sb_push(sb, "nil"); break; }
+                    }
+                    char* s = heap_track(strdup(sb->s)); sb_free(sb);
+                    stack[sp++] = val_str(s);
+                } else if (a.type == VT_FLT || b.type == VT_FLT) {
+                    double va = a.type == VT_FLT ? a.f : (double)a.i;
+                    double vb = b.type == VT_FLT ? b.f : (double)b.i;
+                    stack[sp++] = val_flt(va + vb);
+                } else stack[sp++] = val_int(a.i + b.i);
+                break; }
+
+            case OP_SUB: {
+                Val b = stack[--sp], a = stack[--sp];
+                if (a.type == VT_FLT || b.type == VT_FLT) {
+                    double va = a.type == VT_FLT ? a.f : (double)a.i;
+                    double vb = b.type == VT_FLT ? b.f : (double)b.i;
+                    stack[sp++] = val_flt(va - vb);
+                } else stack[sp++] = val_int(a.i - b.i);
+                break; }
+
+            case OP_MUL: {
+                Val b = stack[--sp], a = stack[--sp];
+                if (a.type == VT_FLT || b.type == VT_FLT) {
+                    double va = a.type == VT_FLT ? a.f : (double)a.i;
+                    double vb = b.type == VT_FLT ? b.f : (double)b.i;
+                    stack[sp++] = val_flt(va * vb);
+                } else stack[sp++] = val_int(a.i * b.i);
+                break; }
+
+            case OP_DIV: {
+                Val b = stack[--sp], a = stack[--sp];
+                if (a.type == VT_FLT || b.type == VT_FLT) {
+                    double va = a.type == VT_FLT ? a.f : (double)a.i;
+                    double vb = b.type == VT_FLT ? b.f : (double)b.i;
+                    stack[sp++] = val_flt(va / vb);
+                } else stack[sp++] = val_int(a.i / b.i);
+                break; }
+
+            case OP_MOD: {
+                Val b = stack[--sp], a = stack[--sp];
+                stack[sp++] = val_int(a.i % b.i);
+                break; }
+
+            case OP_EQ: {
+                Val b = stack[--sp], a = stack[--sp]; int eq = 0;
+                if (a.type != b.type) eq = 0;
+                else switch (a.type) {
+                    case VT_INT: eq = a.i == b.i; break;
+                    case VT_FLT: eq = a.f == b.f; break;
+                    case VT_STR: eq = !strcmp(a.s ? a.s : "", b.s ? b.s : ""); break;
+                    case VT_BOL: eq = a.b == b.b; break;
+                    default: eq = 0;
+                }
+                stack[sp++] = val_bol(eq);
+                break; }
+
+            case OP_NEQ: {
+                Val b = stack[--sp], a = stack[--sp]; int eq = 0;
+                if (a.type != b.type) eq = 1;
+                else switch (a.type) {
+                    case VT_INT: eq = a.i != b.i; break;
+                    case VT_FLT: eq = a.f != b.f; break;
+                    case VT_STR: eq = strcmp(a.s ? a.s : "", b.s ? b.s : "") != 0; break;
+                    case VT_BOL: eq = a.b != b.b; break;
+                    default: eq = 1;
+                }
+                stack[sp++] = val_bol(eq);
+                break; }
+
+            case OP_LT: {
+                Val b = stack[--sp], a = stack[--sp];
+                if (a.type == VT_FLT || b.type == VT_FLT) {
+                    double va = a.type == VT_FLT ? a.f : (double)a.i;
+                    double vb = b.type == VT_FLT ? b.f : (double)b.i;
+                    stack[sp++] = val_bol(va < vb);
+                } else stack[sp++] = val_bol(a.i < b.i);
+                break; }
+
+            case OP_GT: {
+                Val b = stack[--sp], a = stack[--sp];
+                if (a.type == VT_FLT || b.type == VT_FLT) {
+                    double va = a.type == VT_FLT ? a.f : (double)a.i;
+                    double vb = b.type == VT_FLT ? b.f : (double)b.i;
+                    stack[sp++] = val_bol(va > vb);
+                } else stack[sp++] = val_bol(a.i > b.i);
+                break; }
+
+            case OP_LTE: {
+                Val b = stack[--sp], a = stack[--sp];
+                if (a.type == VT_FLT || b.type == VT_FLT) {
+                    double va = a.type == VT_FLT ? a.f : (double)a.i;
+                    double vb = b.type == VT_FLT ? b.f : (double)b.i;
+                    stack[sp++] = val_bol(va <= vb);
+                } else stack[sp++] = val_bol(a.i <= b.i);
+                break; }
+
+            case OP_GTE: {
+                Val b = stack[--sp], a = stack[--sp];
+                if (a.type == VT_FLT || b.type == VT_FLT) {
+                    double va = a.type == VT_FLT ? a.f : (double)a.i;
+                    double vb = b.type == VT_FLT ? b.f : (double)b.i;
+                    stack[sp++] = val_bol(va >= vb);
+                } else stack[sp++] = val_bol(a.i >= b.i);
+                break; }
+
+            case OP_NOT: {
+                Val a = stack[--sp];
+                stack[sp++] = val_bol(!val_to_bol(a));
+                break; }
+
+            case OP_NEG: {
+                Val a = stack[--sp];
+                stack[sp++] = (a.type == VT_FLT) ? val_flt(-a.f) : val_int(-a.i);
+                break; }
+
+            case OP_JMP: ip = cur_code + inst->arg; break;
+            case OP_JMP_IF_FALSE: { Val v = stack[--sp]; if (!val_to_bol(v)) ip = cur_code + inst->arg; break; }
+            case OP_JMP_IF_TRUE: { Val v = stack[--sp]; if (val_to_bol(v)) ip = cur_code + inst->arg; break; }
+
+            case OP_POP: sp--; break;
+            case OP_DUP: stack[sp] = stack[sp - 1]; sp++; break;
+
+            case OP_CALL: {
+                int fi = (int)(inst->arg & 0xFFFF);
+                int argc = (int)((inst->arg >> 16) & 0xFFFF);
+                Func* fn = &ft->f[fi];
+                int ret_pos = sp - argc;
+                /* Save parent's locals before overwriting */
+                int saved_lc = local_count;
+                Val* saved_locals = NULL;
+                if (saved_lc > 0) {
+                    saved_locals = malloc(sizeof(Val) * saved_lc);
+                    memcpy(saved_locals, locals, saved_lc * sizeof(Val));
+                }
+                /* Copy arguments into locals as function params */
+                for (int i = argc - 1; i >= 0; i--)
+                    locals[i] = stack[sp - (argc - i)];
+                local_count = argc;
+                sp -= argc;
+                /* Push call frame */
+                cframes[cf_count].ip = ip;
+                cframes[cf_count].end = code_end;
+                cframes[cf_count].sp = ret_pos;
+                cframes[cf_count].local_count = saved_lc;
+                cframes[cf_count].locals_buf = saved_locals;
+                cframes[cf_count].cur_code = cur_code;
+                cf_count++;
+                cur_code = fn->code.code;
+                ip = fn->code.code;
+                code_end = fn->code.code + fn->code.count;
+                break; }
+
+            case OP_RET: {
+                Val ret = stack[--sp];
+                if (cf_count > 0) {
+                    cf_count--;
+                    ip = cframes[cf_count].ip;
+                    code_end = cframes[cf_count].end;
+                    cur_code = cframes[cf_count].cur_code;
+                    sp = cframes[cf_count].sp;
+                    int parent_lc = cframes[cf_count].local_count;
+                    if (parent_lc > 0 && cframes[cf_count].locals_buf) {
+                        memcpy(locals, cframes[cf_count].locals_buf, parent_lc * sizeof(Val));
+                    }
+                    local_count = parent_lc;
+                    free(cframes[cf_count].locals_buf);
+                    cframes[cf_count].locals_buf = NULL;
+                    stack[sp++] = ret;
+                } else {
+                    return 0;
+                }
+                break; }
+
+            case OP_ARRAY: {
+                int ne = (int)inst->arg;
+                VArr* arr = heap_track(malloc(sizeof(VArr)));
+                arr->cap = ne > 0 ? ne : 4;
+                arr->data = malloc(sizeof(int64_t) * arr->cap);
+                arr->len = ne;
+                for (int i = ne - 1; i >= 0; i--) {
+                    Val v = stack[--sp];
+                    arr->data[i] = v.type == VT_INT ? v.i : (v.type == VT_FLT ? (int64_t)v.f : 0);
+                }
+                stack[sp++] = val_arr(arr);
+                break; }
+
+            case OP_ARR_GET: {
+                Val iv = stack[--sp], av = stack[--sp];
+                VArr* arr = av.p;
+                int idx = (int)iv.i;
+                if (idx < 0 || idx >= arr->len) {
+                    fprintf(stderr, "\xe9\x94\x99\xe8\xaf\xaf: array index %d out of bounds (len=%d)\n", idx, arr->len);
+                    return 1;
+                }
+                stack[sp++] = val_int(arr->data[idx]);
+                break; }
+
+            case OP_ARR_SET: {
+                Val vv = stack[--sp], iv = stack[--sp], av = stack[--sp];
+                VArr* arr = av.p;
+                int idx = (int)iv.i;
+                if (idx < 0 || idx >= arr->len) {
+                    fprintf(stderr, "\xe9\x94\x99\xe8\xaf\xaf: array index %d out of bounds (len=%d)\n", idx, arr->len);
+                    return 1;
+                }
+                arr->data[idx] = vv.type == VT_INT ? vv.i : (vv.type == VT_FLT ? (int64_t)vv.f : 0);
+                break; }
+
+            case OP_ARR_LEN: {
+                Val av = stack[--sp];
+                VArr* arr = av.p;
+                stack[sp++] = val_int(arr->len);
+                break; }
+
+            case OP_FIELD_GET: {
+                Val ov = stack[--sp];
+                Fld* obj = ov.p;
+                Fld* f = &obj[inst->arg];
+                switch (f->type) {
+                    case VT_INT: stack[sp++] = val_int(f->val); break;
+                    case VT_FLT: { double d; memcpy(&d, &f->val, 8); stack[sp++] = val_flt(d); break; }
+                    case VT_BOL: stack[sp++] = val_bol((int)f->val); break;
+                    case VT_STR: stack[sp++] = val_str((const char*)(uintptr_t)f->val); break;
+                    case VT_ARR: stack[sp++] = val_arr((void*)(uintptr_t)f->val); break;
+                    case VT_OBJ: stack[sp++] = val_obj((void*)(uintptr_t)f->val); break;
+                    default: stack[sp++] = val_int(0); break;
+                }
+                break; }
+
+            case OP_FIELD_SET: {
+                Val vv = stack[--sp], ov = stack[--sp];
+                Fld* obj = ov.p;
+                Fld* f = &obj[inst->arg];
+                f->type = vv.type;
+                switch (vv.type) {
+                    case VT_INT: f->val = vv.i; break;
+                    case VT_FLT: memcpy(&f->val, &vv.f, 8); break;
+                    case VT_BOL: f->val = vv.b; break;
+                    case VT_STR: case VT_ARR: case VT_OBJ: f->val = (int64_t)(uintptr_t)vv.p; break;
+                    default: f->val = 0; break;
+                }
+                break; }
+
+            case OP_MAKE_OBJ: {
+                int nf = (int)((inst->arg >> 16) & 0xFFFF);
+                Fld* obj = heap_track(malloc(sizeof(Fld) * nf));
+                for (int i = nf - 1; i >= 0; i--) {
+                    Val v = stack[--sp];
+                    obj[i].type = v.type;
+                    switch (v.type) {
+                        case VT_INT: obj[i].val = v.i; break;
+                        case VT_FLT: memcpy(&obj[i].val, &v.f, 8); break;
+                        case VT_BOL: obj[i].val = v.b; break;
+                        case VT_STR: case VT_ARR: case VT_OBJ: obj[i].val = (int64_t)(uintptr_t)v.p; break;
+                        default: obj[i].val = 0; break;
+                    }
+                }
+                stack[sp++] = val_obj(obj);
+                break; }
+
+            case OP_PRINT: {
+                Val v = stack[--sp];
+                switch (v.type) {
+                    case VT_INT: printf("%lld", (long long)v.i); break;
+                    case VT_FLT: printf("%g", v.f); break;
+                    case VT_STR: printf("%s", v.s ? v.s : "nil"); break;
+                    case VT_BOL: printf("%s", v.b ? "True" : "False"); break;
+                    case VT_ARR: {
+                        VArr* arr = v.p;
+                        printf("[");
+                        for (int i = 0; i < arr->len; i++) {
+                            if (i) printf(", ");
+                            printf("%lld", (long long)arr->data[i]);
+                        }
+                        printf("]");
+                        break; }
+                    case VT_OBJ: printf("{object}"); break;
+                    default: printf("nil"); break;
+                }
+                printf("\n");
+                break; }
+
+            case OP_INPUT: {
+                const char* prompt = (inst->arg < 0) ? NULL : cp->strs[inst->arg];
+                if (prompt) printf("%s", prompt);
+                int64_t v;
+                if (scanf("%lld", &v) != 1) v = 0;
+                stack[sp++] = val_int(v);
+                break; }
+
+            case OP_TYPE: {
+                Val v = stack[--sp];
+                stack[sp++] = val_str(val_typename(v));
+                break; }
+
+            default:
+                fprintf(stderr, "\xe9\x94\x99\xe8\xaf\xaf: unknown opcode %d\n", inst->op);
+                goto vm_cleanup;
+        }
+    }
+
+vm_cleanup:
+    /* Free any still-active call frame locals buffers */
+    for (int i = 0; i < cf_count; i++) free(cframes[i].locals_buf);
+    free(stack);
+    free(locals);
+    return 0;
+}
+
+/* ================================================================
+ *  Section 8: Main
+ * ================================================================ */
+
 static char* read_file(const char* path) {
     FILE* f = fopen(path, "rb"); if (!f) return NULL;
     fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
-    char* buf = malloc(sz + 1); fread(buf, 1, sz, f); buf[sz] = 0; fclose(f); return buf;
+    char* buf = malloc(sz + 1); fread(buf, 1, sz, f); buf[sz] = 0; fclose(f);
+    return buf;
 }
 
-static int file_exists(const char* path) { struct stat st; return stat(path, &st) == 0; }
+int run_dsc(const char* file) {
+    char* src = read_file(file);
+    if (!src) { fprintf(stderr, "\xe9\x94\x99\xe8\xaf\xaf: cannot read %s\n", file); return 1; }
 
-static void compile_dscbt(const char* src_file, const char* out_exe) {
-    char* src = read_file(src_file);
-    if (!src) { fprintf(stderr, "[错误] 无法读取文件: %s\n", src_file); exit(1); }
+    printf("\xe4\xbf\xa1\xe6\x81\xaf: parsing...\n");
+    int tc;
+    Tok** toks = tokenize(src, &tc);
+    Node* prog = parse(toks, tc);
 
-    printf("[信息] 词法分析...\n");
-    int tc; Token** toks = tokenize(src, &tc);
+    printf("\xe4\xbf\xa1\xe6\x81\xaf: compiling...\n");
+    CP cp; cp_init(&cp);
+    FT ft; ft_init(&ft);
+    ST st; st_init(&st);
+    Code main_code; code_init(&main_code);
 
-    printf("[信息] 语法分析...\n");
-    AST* prog = parse(toks, tc);
+    Comp comp;
+    comp.out = &main_code;
+    comp.cp = &cp;
+    comp.ft = &ft;
+    comp.st = &st;
 
-    printf("[信息] 生成C代码...\n");
-    char* c_code = generate_c(prog, src_file);
+    VarEntry* vars = NULL;
 
-    /* write temp C file */
-    char c_file[1024], exe_file[1024];
-    /* output name */
-    if (out_exe) strcpy(exe_file, out_exe);
-    else { strcpy(exe_file, src_file); char* dot = strrchr(exe_file, '.'); if (dot) *dot = 0; strcat(exe_file, ".exe"); }
-    /* temp C file alongside source */
-    strcpy(c_file, src_file); char* dot = strrchr(c_file, '.'); if (dot) *dot = 0; strcat(c_file, "_gen.c");
-
-    FILE* cf = fopen(c_file, "w");
-    if (!cf) { fprintf(stderr, "[错误] 无法写入文件: %s\n", c_file); exit(1); }
-    fputs(c_code, cf); fclose(cf);
-
-    printf("[信息] 编译C代码 -> %s\n", exe_file);
-    /* try gcc first, then clang */
-    char cmd[2048];
-    int ret;
-    snprintf(cmd, sizeof(cmd), "gcc -O2 -Wall -Wno-parentheses -o \"%s\" \"%s\" 2>&1", exe_file, c_file);
-    printf("[信息] 执行: gcc -O2 -o \"%s\" \"%s\"\n", exe_file, c_file);
-    ret = system(cmd);
-    if (ret != 0) {
-        snprintf(cmd, sizeof(cmd), "clang -O2 -Wall -Wno-parentheses -o \"%s\" \"%s\" 2>&1", exe_file, c_file);
-        printf("[信息] 执行: clang -O2 -o \"%s\" \"%s\"\n", exe_file, c_file);
-        ret = system(cmd);
+    /* First pass: compile functions and classes */
+    for (Node* s = prog->a; s; s = s->next) {
+        if (s->kind == ND_FN || s->kind == ND_CLASS)
+            comp_stmt(&comp, s, &vars);
     }
-    if (ret != 0) {
-        fprintf(stderr, "[错误] C编译失败。请确保已安装 MinGW (gcc) 或 Clang。\n");
-        fprintf(stderr, "[提示] 生成的C代码保留在: %s\n", c_file);
-        exit(1);
+    /* Second pass: compile top-level code */
+    for (Node* s = prog->a; s; s = s->next) {
+        if (s->kind != ND_FN && s->kind != ND_CLASS)
+            comp_stmt(&comp, s, &vars);
     }
+    emit0(&main_code, OP_HALT);
+    free_vars(vars);
 
-    printf("[信息] 成功! 输出: %s\n", exe_file);
-    printf("[信息] 中间C代码: %s\n", c_file);
-    /* clean up temp C file */
-    remove(c_file);
+    printf("\xe4\xbf\xa1\xe6\x81\xaf: running...\n");
+    int ret = vm_exec(main_code.code, main_code.count, &cp, &ft, &st);
 
-    /* cleanup */
-    for (int i = 0; i < tc; i++) tk_free(toks[i]); free(toks);
-    free(c_code); free(src);
-    /* AST cleanup (simple) */
+    heap_cleanup();
+    gvar_cleanup();
+    cp_free(&cp); ft_free(&ft); st_free(&st);
+    code_free(&main_code);
+    free(src);
+    for (int i = 0; i < tc; i++) tok_free(toks[i]);
+    free(toks);
+
+    return ret;
 }
 
 int main(int argc, char** argv) {
-    fprintf(stderr, "DSCBT \347\274\226\350\257\221\345\231\250 v1.0 (DSC)\n");
-    if (argc < 2) {
-        fprintf(stderr, "\347\224\250\346\263\225: dsc <\346\272\220\346\226\207\344\273\266.dscbt> [\350\276\223\345\207\272.exe]\n");
-        return 1;
-    }
-    compile_dscbt(argv[1], argc > 2 ? argv[2] : NULL);
-    return 0;
+    fprintf(stderr, "DSC v2.0 - Bytecode VM\n");
+    if (argc < 2) { fprintf(stderr, "Usage: dsc <source.dscbt>\n"); return 1; }
+    return run_dsc(argv[1]);
 }

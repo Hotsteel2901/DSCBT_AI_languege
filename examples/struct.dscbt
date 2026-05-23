@@ -1,20 +1,20 @@
 // struct.dscbt - 结构体示例
 
-typ Point:
+class Point:
     x: int
     y: int
 
-let p = Point{x: 10, y: 20}
-prt(p.x)
-prt(p.y)
+p = Point { x: 10, y: 20 }
+print(p.x)
+print(p.y)
 
 p.x = 100
-prt(p.x)
+print(p.x)
 
-typ Rect:
+class Rect:
     tl: Point
     br: Point
 
-let r = Rect{tl: Point{x: 0, y: 0}, br: Point{x: 10, y: 10}}
-prt(r.tl.x)
-prt(r.br.y)
+r = Rect { tl: Point { x: 0, y: 0 }, br: Point { x: 10, y: 10 } }
+print(r.tl.x)
+print(r.br.y)

@@ -1,0 +1,7 @@
+def test(n):
+    if n <= 1:
+        return 99
+    return n
+
+print(test(1))
+print(test(5))

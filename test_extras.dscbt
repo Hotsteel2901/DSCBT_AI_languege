@@ -1,0 +1,15 @@
+arr = [1, 2, 3, 4, 5]
+print(arr[0])
+print(arr[4])
+print(len(arr))
+
+a = True
+b = False
+c = a and b
+print(c)
+d = a or b
+print(d)
+
+name = "hello"
+greet = name + " world"
+print(greet)

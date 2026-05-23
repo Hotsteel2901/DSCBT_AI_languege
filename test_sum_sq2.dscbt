@@ -1,0 +1,8 @@
+def square(x):
+    return x * x
+
+def sum_sq(a, b):
+    return square(a) + square(b)
+
+x = sum_sq(3, 4)
+print(x)

@@ -1,0 +1,40 @@
+# Hello World
+print("Hello, DSC!")
+
+# Variables
+x = 10
+y = 20
+print(x + y)
+
+# While loop
+i = 0
+while i < 3:
+    print(i)
+    i = i + 1
+
+# For loop
+for j in range(5):
+    print(j)
+
+# If/Else
+if x < y:
+    print("x is less than y")
+els:
+    print("x is not less than y")
+
+# Function
+def add(a, b):
+    return a + b
+
+result = add(3, 7)
+print(result)
+
+# Input (commented out for automated test)
+# val = input("Enter a number: ")
+# print(val)
+
+# Array
+arr = [1, 2, 3, 4, 5]
+print(arr[0])
+arr[0] = 100
+print(arr[0])

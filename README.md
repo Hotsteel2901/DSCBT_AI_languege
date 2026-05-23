@@ -1,46 +1,30 @@
-# DSCBT 编程语言教程
+# DSC 编程语言教程
 
 ## 一、语言简介
 
-DSCBT 是一门**编译型**编程语言，语法类似 Python 般简洁，但具备 C/Rust 般的静态类型系统和本地编译能力。编译器 `dsc` 将 `.dscbt` 源文件编译为原生 Windows 可执行文件（.exe）。
+DSC 是一门**解释型**编程语言，语法类似 Python，内置字节码虚拟机直接执行。不需要外部 C 编译器。
 
 **设计理念：**
-- 语法极简，缩进定义代码块（Python 风格）
-- 静态类型，类型自动推断
-- 编译为原生机器码，运行效率高
+- 语法简洁，缩进定义代码块（Python 风格）
+- 动态类型
+- 内置字节码虚拟机，开箱即用
 - 图灵完备（支持条件、循环、递归函数）
 
 **语言得名：** DSCBT = DS Code Basic Test
-
 ---
 
-## 二、安装与构建
+## 二、构建与使用
 
-### 前置要求
+### 构建
 
-- Windows 操作系统
-- MinGW-w64 (gcc) 或 Clang（C 编译器）
-
-推荐安装 MinGW-w64：[https://www.mingw-w64.org/](https://www.mingw-w64.org/)
-
-### 构建编译器
-
-```batch
-# 使用 build.bat 自动编译
-build.bat
-
-# 或手动编译
-gcc -O2 -o dsc.exe dsc.c
+```bash
+gcc -O2 -o dsc dsc.c
 ```
 
-### 使用编译器
+### 使用
 
-```batch
-# 基本用法
-dsc.exe 源文件.dscbt
-
-# 指定输出文件名
-dsc.exe 源文件.dscbt 输出.exe
+```bash
+dsc 源文件.dscbt
 ```
 
 ---
@@ -51,60 +35,49 @@ dsc.exe 源文件.dscbt 输出.exe
 
 ```
 // 这是单行注释
-
-/* 这是
-   多行注释 */
+# 这也是单行注释
 ```
 
 ### 3.2 变量
 
-使用 `let` 关键字声明变量，类型自动推断：
+直接赋值，类型自动推断：
 
 ```
-let x = 10          // 整数 (int)
-let y = 3.14        // 浮点数 (flt)
-let 名字 = "你好"    // 字符串 (str)
-let 标志 = tru      // 布尔值 (bol)
+x = 10              # 整数
+y = 3.14            # 浮点数
+name = "你好"        # 字符串
+flag = True         # 布尔值
 ```
 
 变量可以被重新赋值：
 
 ```
-let x = 10
-x = 20              // x 现在是 20
-x = x + 5           // x 现在是 25
+x = 10
+x = 20              # x 现在是 20
+x = x + 5           # x 现在是 25
 ```
 
 ### 3.3 数据类型
 
-| 类型名 | 关键字 | 说明              | 示例       |
-|--------|--------|-------------------|------------|
-| 整数   | int    | 64位有符号整数    | `10`, `-5` |
-| 浮点   | flt    | 64位双精度浮点数  | `3.14`     |
-| 字符串 | str    | 字符串字面量      | `"hello"`  |
-| 布尔   | bol    | 真/假值           | `tru`,`fal`|
+| 关键字  | 说明              | 示例       |
+|---------|-------------------|------------|
+| True    | 布尔真            | `True`     |
+| False   | 布尔假            | `False`    |
 
-类型注解（可选）：
-
-```
-let x: int = 10
-let y: flt = 3.14
-let s: str = "hello"
-let b: bol = tru
-```
+类型通过内置函数 `type()` 查看。
 
 ### 3.4 输出与输入
 
 ```
-// 输出
-prt("你好，世界")
-prt(42)
-prt(3.14)
-prt(tru)
+# 输出
+print("你好，世界")
+print(42)
+print(3.14)
+print(True)
 
-// 输入整数
-let 年龄 = inp("请输入年龄: ")
-prt(年龄)
+# 输入整数
+age = input("请输入年龄: ")
+print(age)
 ```
 
 ### 3.5 运算符
@@ -112,47 +85,47 @@ prt(年龄)
 **算术运算符：**
 
 ```
-let 和 = a + b      // 加法
-let 差 = a - b      // 减法
-let 积 = a * b      // 乘法
-let 商 = a / b      // 除法
-let 余 = a % b      // 取模（求余）
+sum = a + b         # 加法
+diff = a - b        # 减法
+prod = a * b        # 乘法
+quot = a / b        # 除法
+rem = a % b         # 取模（求余）
 ```
 
 字符串也可以使用 `+` 拼接：
 
 ```
-let 问候 = "你好, " + "世界"
-prt(问候)           // 输出: 你好, 世界
+greeting = "你好, " + "世界"
+print(greeting)     # 输出: 你好, 世界
 ```
 
 **比较运算符：**
 
 ```
-a == b              // 等于
-a != b              // 不等于
-a < b               // 小于
-a > b               // 大于
-a <= b              // 小于等于
-a >= b              // 大于等于
+a == b              # 等于
+a != b              # 不等于
+a < b               # 小于
+a > b               # 大于
+a <= b              # 小于等于
+a >= b              # 大于等于
 ```
 
 **逻辑运算符：**
 
 ```
-a & b               // 逻辑与 (AND)
-a | b               // 逻辑或 (OR)
-!a                  // 逻辑非 (NOT)
+a and b             # 逻辑与 (AND)（短路求值）
+a or b              # 逻辑或 (OR)（短路求值）
+not a               # 逻辑非 (NOT)
 ```
 
 **优先级（从高到低）：**
-1. `!` `-`（一元）
+1. `not` `-`（一元）
 2. `*` `/` `%`
 3. `+` `-`
 4. `<` `>` `<=` `>=`
 5. `==` `!=`
-6. `&`
-7. `|`
+6. `and`
+7. `or`
 
 ---
 
@@ -172,49 +145,44 @@ els:
 示例：
 
 ```
-let 分数 = 85
+score = 85
 
-if 分数 >= 90:
-    prt("优秀")
-els if 分数 >= 80:
-    prt("良好")
-els if 分数 >= 60:
-    prt("及格")
+if score >= 90:
+    print("优秀")
+els if score >= 80:
+    print("良好")
+els if score >= 60:
+    print("及格")
 els:
-    prt("不及格")
+    print("不及格")
 ```
 
 ### 4.2 While 循环
 
 ```
-whl 条件:
+while 条件:
     语句...
 ```
 
 示例：
 
 ```
-let i = 0
-whl i < 10:
-    prt(i)
+i = 0
+while i < 10:
+    print(i)
     i = i + 1
 ```
 
 ### 4.3 For 循环
 
-```
-for let 变量 = 初始值; 条件; 更新:
-    语句...
-```
-
-示例：
+`for ... in range(n):` 循环从 0 到 n-1：
 
 ```
-for let i = 0; i < 10; i = i + 1:
-    prt(i)
+for i in range(10):
+    print(i)
 ```
 
-等价于 C 语言的 `for (int i = 0; i < 10; i = i + 1)`。
+等价于 Python 的 `for i in range(10):`。
 
 ---
 
@@ -223,261 +191,264 @@ for let i = 0; i < 10; i = i + 1:
 ### 5.1 函数定义
 
 ```
-fn 函数名(参数1, 参数2, ...):
+def 函数名(参数1, 参数2, ...):
     语句...
-    ret 返回值
+    return 返回值
 ```
 
 示例：
 
 ```
-fn 加法(a, b):
-    ret a + b
+def add(a, b):
+    return a + b
 
-fn 最大值(a, b):
+def max_val(a, b):
     if a > b:
-        ret a
-    ret b
+        return a
+    return b
 
-prt(加法(3, 5))      // 输出: 8
-prt(最大值(10, 20))   // 输出: 20
+print(add(3, 5))      # 输出: 8
+print(max_val(10, 20))  # 输出: 20
 ```
 
 ### 5.2 递归
 
-DSCBT 支持递归函数调用：
+DSC 支持递归函数调用：
 
 ```
-fn 阶乘(n):
+def fact(n):
     if n <= 1:
-        ret 1
-    ret n * 阶乘(n - 1)
+        return 1
+    return n * fact(n - 1)
 
-prt(阶乘(5))         // 输出: 120
+print(fact(5))         # 输出: 120
 ```
 
 ```
-fn 斐波那契(n):
+def fib(n):
     if n <= 1:
-        ret n
-    ret 斐波那契(n - 1) + 斐波那契(n - 2)
+        return n
+    return fib(n - 1) + fib(n - 2)
 
-prt(斐波那契(10))    // 输出: 55
+print(fib(10))        # 输出: 55
 ```
 
-### 5.3 返回类型注解
-
-```
-fn 除以(a: flt, b: flt): flt:
-    ret a / b
-```
-
-如果没有 `ret` 语句，函数默认返回 0。
+如果没有 `return` 语句，函数默认返回 0。
 
 ---
 
 ## 六、结构体
 
-使用 `typ` 关键字定义结构体类型：
+使用 `class` 关键字定义结构体类型：
 
 ```
-typ 点:
+class Point:
     x: int
     y: int
 
-let p = 点{x: 10, y: 20}
-prt(p.x)
-prt(p.y)
+p = Point { x: 10, y: 20 }
+print(p.x)            # 输出: 10
+print(p.y)            # 输出: 20
 
-// 修改字段
+# 修改字段
 p.x = 100
-prt(p.x)
+print(p.x)            # 输出: 100
+```
+
+支持嵌套结构体：
+
+```
+class Rect:
+    tl: Point
+    br: Point
+
+r = Rect { tl: Point { x: 0, y: 0 }, br: Point { x: 10, y: 10 } }
+print(r.tl.x)         # 输出: 0
+print(r.br.y)         # 输出: 10
 ```
 
 ---
 
 ## 七、数组
 
-### 7.1 创建数组
+### 7.1 创建与访问
 
 ```
-let 数字 = [1, 2, 3, 4, 5]
-let 名字 = ["张三", "李四", "王五"]
+arr = [10, 20, 30, 40, 50]
+
+print(arr[0])         # 输出: 10
+print(arr[2])         # 输出: 30
+
+arr[1] = 99
+print(arr[1])         # 输出: 99
 ```
 
-### 7.2 访问和修改
+### 7.2 数组长度
+
+使用 `len()` 内置函数：
 
 ```
-let 数组 = [10, 20, 30, 40, 50]
-
-prt(数组[0])        // 输出: 10
-prt(数组[2])        // 输出: 30
-
-数组[1] = 99
-prt(数组[1])        // 输出: 99
-```
-
-### 7.3 数组长度
-
-```
-let 数组 = [1, 2, 3, 4, 5]
-prt(#数组)          // 输出: 5
+arr = [1, 2, 3, 4, 5]
+print(len(arr))       # 输出: 5
 ```
 
 ---
 
-## 八、完整示例
+## 八、内置函数
+
+| 函数                | 说明           | 示例                      |
+|---------------------|----------------|---------------------------|
+| `print(x)`          | 打印值并换行   | `print("hello")`          |
+| `input("提示")`     | 读取整数输入   | `x = input("Enter: ")`    |
+| `len(arr)`          | 获取数组长度   | `len([1, 2, 3])` → 3      |
+| `type(x)`           | 获取类型名称   | `type(42)` → "int"        |
+
+---
+
+## 九、完整示例
 
 ### 示例 1：Hello World
 
 ```
-prt("你好，世界！")
-prt("欢迎使用 DSCBT 编程语言")
+print("你好，世界！")
+print("欢迎使用 DSC 编程语言")
 ```
 
 ### 示例 2：计算 1 到 100 的和
 
 ```
-let 和 = 0
-let i = 1
-whl i <= 100:
-    和 = 和 + i
+sum = 0
+i = 1
+while i <= 100:
+    sum = sum + i
     i = i + 1
-prt(和)
+print(sum)            # 输出: 5050
 ```
 
 ### 示例 3：判断质数
 
 ```
-fn 是质数(n):
+def is_prime(n):
     if n <= 1:
-        ret fal
-    let i = 2
-    whl i * i <= n:
+        return False
+    i = 2
+    while i * i <= n:
         if n % i == 0:
-            ret fal
+            return False
         i = i + 1
-    ret tru
+    return True
 
-// 打印 1 到 100 的所有质数
-let 数 = 2
-whl 数 <= 100:
-    if 是质数(数):
-        prt(数)
-    数 = 数 + 1
+# 打印 1 到 50 的质数
+num = 2
+while num <= 50:
+    if is_prime(num):
+        print(num)
+    num = num + 1
 ```
 
 ### 示例 4：冒泡排序
 
 ```
-let 数组 = [64, 34, 25, 12, 22, 11, 90]
+arr = [64, 34, 25, 12, 22, 11, 90]
+n = len(arr)
 
-let n = #数组
-for let i = 0; i < n; i = i + 1:
-    for let j = 0; j < n - i - 1; j = j + 1:
-        if 数组[j] > 数组[j + 1]:
-            let 临时 = 数组[j]
-            数组[j] = 数组[j + 1]
-            数组[j + 1] = 临时
+for i in range(n):
+    for j in range(n - i - 1):
+        if arr[j] > arr[j + 1]:
+            temp = arr[j]
+            arr[j] = arr[j + 1]
+            arr[j + 1] = temp
 
-// 打印排序结果
-let k = 0
-whl k < n:
-    prt(数组[k])
+# 打印结果
+k = 0
+while k < n:
+    print(arr[k])
     k = k + 1
 ```
 
 ### 示例 5：欧几里得算法求最大公约数
 
 ```
-fn 最大公约数(a, b):
-    whl b != 0:
-        let 临时 = b
+def gcd(a, b):
+    while b != 0:
+        temp = b
         b = a % b
-        a = 临时
-    ret a
+        a = temp
+    return a
 
-prt(最大公约数(48, 18))  // 输出: 6
-prt(最大公约数(100, 25)) // 输出: 25
+print(gcd(48, 18))   # 输出: 6
+print(gcd(100, 25))  # 输出: 25
 ```
 
 ---
 
-## 九、语法参考
+## 十、语法参考
 
 ### 关键字一览
 
-| 关键字 | 用途       | 示例                         |
-|--------|------------|------------------------------|
-| let    | 变量声明   | `let x = 10`                 |
-| fn     | 函数定义   | `fn foo(a, b):`              |
-| ret    | 函数返回   | `ret x + 1`                  |
-| if     | 条件判断   | `if x > 0:`                  |
-| els    | 条件分支   | `els:` 或 `els if x > 5:`    |
-| whl    | while 循环 | `whl x > 0:`                 |
-| for    | for 循环   | `for let i=0; i<10; i=i+1:`  |
-| prt    | 打印输出   | `prt("hello")`               |
-| inp    | 读取输入   | `let x = inp("请输入:")`     |
-| tru    | 布尔真     | `let b = tru`                |
-| fal    | 布尔假     | `let b = fal`                |
-| typ    | 结构体类型 | `typ Point:`                 |
-| int    | 整数类型   | `let x: int = 10`            |
-| flt    | 浮点类型   | `let y: flt = 3.14`          |
-| str    | 字符串类型 | `let s: str = "hi"`          |
-| bol    | 布尔类型   | `let b: bol = tru`           |
-| void   | 空类型     | 用于函数返回类型             |
+| 关键字  | 用途             | 示例                           |
+|---------|------------------|--------------------------------|
+| def     | 函数定义         | `def foo(a, b):`               |
+| return  | 函数返回         | `return x + 1`                 |
+| class   | 结构体定义       | `class Point:`                 |
+| if      | 条件判断         | `if x > 0:`                    |
+| els     | 条件分支         | `els:` 或 `els if x > 5:`     |
+| while   | while 循环       | `while x > 0:`                 |
+| for     | for 循环         | `for i in range(10):`          |
+| in      | 成员遍历         | `for x in range(n):`           |
+| range   | 范围生成         | `range(10)`                    |
+| and     | 逻辑与           | `a and b`                      |
+| or      | 逻辑或           | `a or b`                       |
+| not     | 逻辑非           | `not a`                       |
+| True    | 布尔真           | `flag = True`                  |
+| False   | 布尔假           | `flag = False`                 |
+
+### 内置函数
+
+| 函数    | 用途             |
+|---------|------------------|
+| print   | 打印输出         |
+| input   | 读取输入         |
+| len     | 数组长度         |
+| type    | 获取类型名称     |
 
 ### 特殊符号
 
 | 符号 | 用途               |
 |------|--------------------|
-| `#`  | 数组长度（`#数组`）|
 | `.`  | 字段访问（`p.x`）  |
 | `[]` | 数组索引           |
 | `{}` | 结构体字面量       |
 
 ---
 
-## 十、与 Python / C / Rust 的对比
+## 十一、与旧版 v1 的语法对照
 
-| 特性       | DSCBT      | Python     | C          | Rust       |
-|------------|------------|------------|------------|------------|
-| 类型系统   | 静态，推断 | 动态       | 静态，显式 | 静态，推断 |
-| 内存管理   | 自动（栈） | 自动（GC） | 手动       | 所有权系统 |
-| 缩进语法   | 是         | 是         | 否         | 否         |
-| 编译方式   | 编译为exe  | 解释执行   | 编译为exe  | 编译为exe  |
-| 运行速度   | 快         | 较慢       | 快         | 快         |
-| 学习难度   | 简单       | 简单       | 中等       | 较难       |
-
----
-
-## 十一、常见问题
-
-**Q: 为什么需要 C 编译器？**
-A: DSCBT 编译器将源码翻译为 C 代码，再调用 gcc/clang 编译为 .exe。这种设计让编译器可以专注于语法解析，而代码优化和本地代码生成交由成熟的 C 编译器完成。
-
-**Q: 运行 exe 时缺少 DLL？**
-A: 请确保 MinGW 的 bin 目录在 PATH 环境变量中，或将需要的 DLL 与 exe 放在同一目录。
-
-**Q: 支持哪些平台？**
-A: 目前仅支持 Windows。理论上编译器本身（dsc.c）可以在任何有 C 编译器的平台编译，但生成的可执行文件仅限当前架构。
-
-**Q: 语言是图灵完备的吗？**
-A: 是的。DSCBT 支持变量、条件分支、while 循环、函数递归——这些是图灵完备的充分条件。
+| 旧语法 (v1)                                | 新语法 (v2)                          |
+|--------------------------------------------|--------------------------------------|
+| `prt("hello")`                             | `print("hello")`                     |
+| `inp("prompt")`                            | `input("prompt")`                    |
+| `let x = 5`                                | `x = 5`                              |
+| `fn add(a, b):`                            | `def add(a, b):`                     |
+| `ret x`                                    | `return x`                           |
+| `whl cond:`                                | `while cond:`                        |
+| `tru` / `fal`                              | `True` / `False`                     |
+| `a & b` / `a \| b`                         | `a and b` / `a or b`                |
+| `typ Point:`                               | `class Point:`                       |
+| `for let i=0; i<n; i=i+1:`                 | `for i in range(n):`                |
+| `#arr`                                     | `len(arr)`                           |
 
 ---
 
-## 十二、限制与未来计划
+## 十二、限制
 
-### 当前限制
-
-- 没有指针或引用类型
-- 没有动态内存分配（字符串拼接除外）
-- 字符串拼接可能产生内存泄漏（使用后不释放）
-- 没有标准库（仅有 prt 和 inp）
+- 没有垃圾回收（仅程序退出时清理堆内存）
+- 没有字符串转义（部分支持）
 - 没有模块/导入系统
 - 数组是固定大小的（编译时确定）
 - 没有泛型
+- 没有浮点数组/结构体字段的完整支持
+- 没有错误恢复机制
 
 ### 未来永远不可能添加
 

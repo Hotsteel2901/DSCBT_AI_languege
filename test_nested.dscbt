@@ -1,0 +1,8 @@
+def inner(x):
+    return x * 2
+
+def outer(a, b):
+    return inner(a) + inner(b)
+
+x = outer(3, 4)
+print(x)

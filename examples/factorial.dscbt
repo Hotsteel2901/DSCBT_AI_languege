@@ -1,12 +1,12 @@
 // factorial.dscbt - 阶乘计算
 
-fn fact(n):
+def fact(n):
     if n <= 1:
-        ret 1
-    ret n * fact(n - 1)
+        return 1
+    return n * fact(n - 1)
 
-prt("阶乘:")
-let i = 1
-whl i <= 10:
-    prt(fact(i))
+print("阶乘:")
+i = 1
+while i <= 10:
+    print(fact(i))
     i = i + 1

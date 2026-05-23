@@ -1,0 +1,12 @@
+def double(x):
+    return x + x
+
+def triple(y):
+    return y + y + y
+
+def combined(a, b):
+    x = double(a)
+    y = triple(b)
+    return x + y
+
+print(combined(2, 3))

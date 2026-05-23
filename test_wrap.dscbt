@@ -1,0 +1,7 @@
+def square(x):
+    return x * x
+
+def wrapper(y):
+    return square(y)
+
+print(wrapper(5))

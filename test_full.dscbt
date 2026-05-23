@@ -1,0 +1,92 @@
+# DSC Language Comprehensive Test
+# Expected output: 8, 10, 20, 30, 10, 3, 300, 25, 1, 5, 5, False, True, hello world, 10, 20, 13, done
+
+# 1. Simple arithmetic
+a = 5
+b = 3
+c = a + b
+print(c)
+
+# 2. Variable assignment
+x = 10
+print(x)
+
+# 3. Multiple prints
+y = 20
+print(y)
+print(x + y)
+
+# 4. If/else
+if x > 5:
+    print(x)
+els:
+    print(0)
+
+# 5. While loop
+i = 0
+s = 0
+while i < 3:
+    s = s + i
+    i = i + 1
+print(s)
+
+# 6. For loop
+total = 0
+for i in range(3):
+    total = total + i
+print(total)
+
+# 7. Simple function
+def add(a, b):
+    return a + b
+
+result = add(100, 200)
+print(result)
+
+# 8. Nested function calls
+def square(x):
+    return x * x
+
+print(square(5))
+
+# 9. Arrays
+arr = [1, 2, 3, 4, 5]
+print(arr[0])
+print(arr[4])
+print(len(arr))
+
+# 10. Short-circuit logic
+a = True
+b = False
+c = a and b
+print(c)
+d = a or b
+print(d)
+
+# 11. String concatenation
+name = "hello"
+greet = name + " world"
+print(greet)
+
+# 12. Classes
+class Point:
+    x: int
+    y: int
+
+p = Point { x: 10, y: 20 }
+print(p.x)
+print(p.y)
+
+# 13. Nested function calls with addition
+def double(x):
+    return x + x
+
+def triple(y):
+    return y + y + y
+
+def combined(a, b):
+    return double(a) + triple(b)
+
+print(combined(2, 3))
+
+print("done")

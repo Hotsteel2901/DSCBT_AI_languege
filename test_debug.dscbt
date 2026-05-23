@@ -1,0 +1,8 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include <stdint.h>
+#include <stdarg.h>
+
+// Just add a bytecode disassembler after compiling...

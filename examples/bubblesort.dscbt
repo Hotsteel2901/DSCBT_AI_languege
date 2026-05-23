@@ -1,23 +1,25 @@
 // bubblesort.dscbt - 冒泡排序
 
-let arr = [64, 34, 25, 12, 22, 11, 90]
-let n = #arr
+arr = [64, 34, 25, 12, 22, 11, 90]
+n = len(arr)
 
-prt("排序前:")
-let k = 0
-whl k < n:
-    prt(arr[k])
+print("排序前:")
+k = 0
+while k < n:
+    print(arr[k])
     k = k + 1
 
-for let i = 0; i < n; i = i + 1:
-    for let j = 0; j < n - i - 1; j = j + 1:
+for i in range(n):
+    j = 0
+    while j < n - i - 1:
         if arr[j] > arr[j + 1]:
-            let tmp = arr[j]
+            tmp = arr[j]
             arr[j] = arr[j + 1]
             arr[j + 1] = tmp
+        j = j + 1
 
-prt("排序后:")
+print("排序后:")
 k = 0
-whl k < n:
-    prt(arr[k])
+while k < n:
+    print(arr[k])
     k = k + 1

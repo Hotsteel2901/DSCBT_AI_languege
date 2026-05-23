@@ -1,8 +1,8 @@
 // hello.dscbt - Hello World 示例
-prt("你好，世界！")
-prt("DSCBT 编程语言")
-prt("================")
+print("你好，世界！")
+print("DSCBT 编程语言")
+print("================")
 
-let x = 42
-let y = 58
-prt(x + y)
+x = 42
+y = 58
+print(x + y)
